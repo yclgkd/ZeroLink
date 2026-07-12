@@ -74,6 +74,7 @@ docker compose --profile storage -f docker-compose.yml -f docker-compose.build.y
 
 - `SELFHOST_API_RP_ID=localhost`
 - `SELFHOST_API_RP_ORIGIN=http://localhost:8080`
+- `SELFHOST_API_TRUSTED_PROXY_CIDRS=172.30.0.2/32` 只信任固定 Caddy web 容器转发的客户端 IP 和 HTTPS 头。Compose 会把该容器固定为 `172.30.0.2`；如果修改 `172.30.0.0/24` 网络，需要同步修改网络 subnet、`web.networks.default.ipv4_address` 和这个 CIDR。
 - `SELFHOST_API_COMMIT_TOKEN_SECRET` 是必填项，用于 commit-cookie 绑定和文件上传/下载 token 签名；在任何非本地部署前，请用 `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` 生成新的 32 字节 hex 值替换它
 - `ZEROLINK_IMAGE_REPOSITORY=ghcr.io/yclgkd` 控制 `migrate`、`api`、`web` 默认从哪个 GHCR namespace 拉取镜像
 - `ZEROLINK_IMAGE_TAG=latest` 控制 `migrate`、`api`、`web` 默认拉取的发布镜像 tag
