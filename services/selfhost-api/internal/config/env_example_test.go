@@ -34,3 +34,20 @@ func TestSelfhostEnvExampleIncludesTrustedProxyConfig(t *testing.T) {
 		t.Fatalf("%s is missing SELFHOST_API_TRUSTED_PROXY_CIDRS", envExamplePath)
 	}
 }
+
+func TestSelfhostCaddyfileStripsSpoofableClientIPHeaders(t *testing.T) {
+	t.Parallel()
+
+	caddyfilePath := filepath.Join("..", "..", "..", "..", "deploy", "selfhost", "Caddyfile")
+	content, err := os.ReadFile(caddyfilePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", caddyfilePath, err)
+	}
+
+	want := "reverse_proxy @api api:8788 {\n" +
+		"      header_up -CF-Connecting-IP\n" +
+		"      header_up -X-Real-IP\n"
+	if !strings.Contains(string(content), want) {
+		t.Fatalf("%s must strip spoofable client IP headers in the API proxy", caddyfilePath)
+	}
+}

@@ -7,7 +7,10 @@
       not path /api/* /healthz /readyz /assets/*
     }
 
-    reverse_proxy @api api:8788
+    reverse_proxy @api api:8788 {
+      header_up -CF-Connecting-IP
+      header_up -X-Real-IP
+    }
 
     header @frontend Cache-Control "no-store"
     header /assets/* Cache-Control "public, max-age=31536000, immutable"
