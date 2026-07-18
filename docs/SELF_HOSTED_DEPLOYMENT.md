@@ -77,7 +77,8 @@ Then open:
 
 - `SELFHOST_API_RP_ID=localhost`
 - `SELFHOST_API_RP_ORIGIN=http://localhost:8080`
-- `SELFHOST_API_TRUSTED_PROXY_CIDRS=172.30.0.2/32` trusts forwarded client IP and HTTPS headers only from the fixed Caddy web container. The Compose file pins that container to `172.30.0.2`; if you change the `172.30.0.0/24` network, update the network subnet, `web.networks.default.ipv4_address`, and this CIDR together.
+- `SELFHOST_NETWORK_SUBNET=172.30.0.0/24` controls the private Compose network subnet, and `SELFHOST_WEB_IP=172.30.0.2` controls the Caddy web container address. If the subnet overlaps an existing Docker or VPN network, choose another private subnet and update both values.
+- `SELFHOST_API_TRUSTED_PROXY_CIDRS=172.30.0.2/32` trusts forwarded client IP and HTTPS headers only from Caddy. Keep this CIDR synchronized with `SELFHOST_WEB_IP`; otherwise forwarded client identity and secure-cookie detection will not work through the bundled proxy.
 - `SELFHOST_API_COMMIT_TOKEN_SECRET` is required for commit-cookie binding and signed file upload/download tokens; generate a fresh 32-byte hex value with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` before any non-local deployment
 - `ZEROLINK_IMAGE_REPOSITORY=ghcr.io/yclgkd` selects which GHCR namespace `migrate`, `api`, and `web` pull from
 - `ZEROLINK_IMAGE_TAG=latest` selects the published image tag used by `migrate`, `api`, and `web`

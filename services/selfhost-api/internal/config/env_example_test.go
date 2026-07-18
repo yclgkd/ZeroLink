@@ -35,6 +35,38 @@ func TestSelfhostEnvExampleIncludesTrustedProxyConfig(t *testing.T) {
 	}
 }
 
+func TestSelfhostComposeNetworkSettingsAreOverridable(t *testing.T) {
+	t.Parallel()
+
+	rootPath := filepath.Join("..", "..", "..", "..")
+	envExample, err := os.ReadFile(filepath.Join(rootPath, "deploy", "selfhost", ".env.example"))
+	if err != nil {
+		t.Fatalf("ReadFile(.env.example) error = %v", err)
+	}
+	compose, err := os.ReadFile(filepath.Join(rootPath, "deploy", "selfhost", "docker-compose.yml"))
+	if err != nil {
+		t.Fatalf("ReadFile(docker-compose.yml) error = %v", err)
+	}
+
+	for _, setting := range []string{
+		"SELFHOST_NETWORK_SUBNET=172.30.0.0/24",
+		"SELFHOST_WEB_IP=172.30.0.2",
+		"SELFHOST_API_TRUSTED_PROXY_CIDRS=172.30.0.2/32",
+	} {
+		if !strings.Contains(string(envExample), setting) {
+			t.Fatalf(".env.example is missing default setting %s", setting)
+		}
+	}
+	for _, expression := range []string{
+		"${SELFHOST_WEB_IP:-172.30.0.2}",
+		"${SELFHOST_NETWORK_SUBNET:-172.30.0.0/24}",
+	} {
+		if !strings.Contains(string(compose), expression) {
+			t.Fatalf("docker-compose.yml is missing override expression %s", expression)
+		}
+	}
+}
+
 func TestSelfhostCaddyfileStripsSpoofableClientIPHeaders(t *testing.T) {
 	t.Parallel()
 

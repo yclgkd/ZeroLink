@@ -31,6 +31,7 @@ jobs:
     outputs:
       run_node: ${{ steps.filter.outputs.run_node }}
       run_go: ${{ steps.filter.outputs.run_go }}
+      run_selfhost: ${{ steps.filter.outputs.run_selfhost }}
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -44,6 +45,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "run_node=true" >> "$GITHUB_OUTPUT"
             echo "run_go=true" >> "$GITHUB_OUTPUT"
+            echo "run_selfhost=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -52,6 +54,7 @@ jobs:
 
           run_node=false
           run_go=false
+          run_selfhost=false
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
@@ -59,7 +62,12 @@ jobs:
             if [ "$file" = ".github/workflows/pr-validate.yml" ]; then
               run_node=true
               run_go=true
+              run_selfhost=true
               continue
+            fi
+
+            if [[ "$file" == deploy/selfhost/* ]]; then
+              run_selfhost=true
             fi
 
             if [[ "$file" == services/selfhost-api/* ]]; then
@@ -86,6 +94,7 @@ jobs:
 
           echo "run_node=$run_node" >> "$GITHUB_OUTPUT"
           echo "run_go=$run_go" >> "$GITHUB_OUTPUT"
+          echo "run_selfhost=$run_selfhost" >> "$GITHUB_OUTPUT"
 
   pr-quality:
     name: PR Quality
@@ -173,3 +182,22 @@ jobs:
         env:
           SELFHOST_API_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zerolink_selfhost?sslmode=disable
         run: go test -p 1 ./...
+
+  selfhost-caddy:
+    name: Self-Hosted Caddy
+    needs: changes
+    if: (github.event_name == 'merge_group' || !github.event.pull_request.draft) && needs.changes.outputs.run_selfhost == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Validate Caddyfile
+        run: >-
+          docker run --rm
+          -v "$GITHUB_WORKSPACE/deploy/selfhost/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.8-alpine
+          caddy validate
+          --config /etc/caddy/Caddyfile
+          --adapter caddyfile
