@@ -30,6 +30,16 @@ import type { Env } from './worker.ts';
 const AES_GCM_TAG_BYTES = AES_GCM.TAG_LENGTH_BITS / 8;
 const FILE_UPLOAD_INITIATE_RATE_LIMIT_MAX_REQUESTS = 10;
 const FILE_UPLOAD_INITIATE_RATE_LIMIT_WINDOW_MS = 60_000;
+class MultipartCompletionError extends Error {
+  constructor(
+    readonly code: 'BAD_REQUEST' | 'UPLOAD_INCOMPLETE',
+    readonly status: 400 | 409,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 const fileUploadInitiateRateLimitWindows = new WeakMap<
   Env,
   Map<string, { count: number; windowStart: number }>
@@ -466,24 +476,7 @@ export async function handleFileUploadComplete(request: Request, env: Env): Prom
     return errorResponse('BAD_REQUEST', 400);
   }
 
-  const completionMarkerKey = buildMultipartUploadCompletionMarkerKey(
-    uploadSession.channelUuid,
-    parsed.data.uploadId as Base64Url
-  );
-  if (await env.FILE_BUCKET.head(completionMarkerKey)) {
-    return errorResponse('NOT_FOUND', 404);
-  }
-
   const sortedChunks = [...parsed.data.chunks].sort((left, right) => left.index - right.index);
-  const resolvedChunks: Array<{
-    index: number;
-    sourceStorageKey: string;
-    storageKey: string;
-    ciphertextBytes: number;
-    ciphertextHash: HexString;
-    etag: string;
-  }> = [];
-
   for (const chunk of sortedChunks) {
     const expectedCiphertextBytes = resolveExpectedChunkCiphertextBytes(
       parsed.data.totalPlaintextBytes,
@@ -494,47 +487,132 @@ export async function handleFileUploadComplete(request: Request, env: Env): Prom
     if (expectedCiphertextBytes == null || chunk.ciphertextBytes !== expectedCiphertextBytes) {
       return errorResponse('BAD_REQUEST', 400);
     }
-
-    const storageKey = buildMultipartChunkStorageKey(
-      uploadSession.channelUuid,
-      parsed.data.uploadId as Base64Url,
-      chunk.index
-    );
-    const finalStorageKey = buildMultipartFinalStorageKey(
-      uploadSession.channelUuid,
-      parsed.data.uploadId as Base64Url,
-      chunk.index
-    );
-    const storedObject = await env.FILE_BUCKET.head(storageKey);
-    if (!storedObject) {
-      return errorResponse('UPLOAD_INCOMPLETE', 409);
-    }
-    if (storedObject.size !== chunk.ciphertextBytes) {
-      return errorResponse('BAD_REQUEST', 400);
-    }
-    if (storedObject.etag !== chunk.etag) {
-      return errorResponse('UPLOAD_INCOMPLETE', 409);
-    }
-    if (await env.FILE_BUCKET.head(finalStorageKey)) {
-      return errorResponse('NOT_FOUND', 404);
-    }
-
-    resolvedChunks.push({
-      index: chunk.index,
-      sourceStorageKey: storageKey,
-      storageKey: finalStorageKey,
-      ciphertextBytes: chunk.ciphertextBytes,
-      ciphertextHash: chunk.ciphertextHash,
-      etag: chunk.etag,
-    });
   }
 
+  const completionMarkerKey = buildMultipartUploadCompletionMarkerKey(
+    uploadSession.channelUuid,
+    parsed.data.uploadId as Base64Url
+  );
+  const completionMarker = await env.FILE_BUCKET.put(completionMarkerKey, '', {
+    onlyIf: {
+      etagDoesNotMatch: '*',
+    },
+    customMetadata: {
+      channelUuid: uploadSession.channelUuid,
+      uploadId: parsed.data.uploadId,
+      expiresAt: String(uploadSession.expiresAt),
+    },
+  });
+
+  if (!completionMarker) {
+    const finalizedChunks: Array<{
+      index: number;
+      sourceStorageKey: string;
+      storageKey: string;
+      ciphertextBytes: number;
+      ciphertextHash: HexString;
+      etag: string;
+    }> = [];
+
+    for (const chunk of sortedChunks) {
+      const sourceStorageKey = buildMultipartChunkStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalStorageKey = buildMultipartFinalStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalizedObject = await env.FILE_BUCKET.head(finalStorageKey);
+      if (!finalizedObject || finalizedObject.size !== chunk.ciphertextBytes) {
+        return errorResponse('UPLOAD_INCOMPLETE', 409);
+      }
+
+      finalizedChunks.push({
+        index: chunk.index,
+        sourceStorageKey,
+        storageKey: finalStorageKey,
+        ciphertextBytes: chunk.ciphertextBytes,
+        ciphertextHash: chunk.ciphertextHash,
+        etag: chunk.etag,
+      });
+    }
+
+    return jsonResponse(
+      makeFileCompleteResponse(buildMultipartFileRef(uploadSession, parsed.data, finalizedChunks)),
+      200
+    );
+  }
+
+  const resolvedChunks: Array<{
+    index: number;
+    sourceStorageKey: string;
+    storageKey: string;
+    ciphertextBytes: number;
+    ciphertextHash: HexString;
+    etag: string;
+  }> = [];
   const finalizedStorageKeys: string[] = [];
+
   try {
+    for (const chunk of sortedChunks) {
+      const storageKey = buildMultipartChunkStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalStorageKey = buildMultipartFinalStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const storedObject = await env.FILE_BUCKET.head(storageKey);
+      if (!storedObject) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `missing multipart chunk: ${storageKey}`
+        );
+      }
+      if (storedObject.size !== chunk.ciphertextBytes) {
+        throw new MultipartCompletionError(
+          'BAD_REQUEST',
+          400,
+          `multipart chunk size mismatch: ${storageKey}`
+        );
+      }
+      if (storedObject.etag !== chunk.etag) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `multipart chunk changed before finalization: ${storageKey}`
+        );
+      }
+
+      resolvedChunks.push({
+        index: chunk.index,
+        sourceStorageKey: storageKey,
+        storageKey: finalStorageKey,
+        ciphertextBytes: chunk.ciphertextBytes,
+        ciphertextHash: chunk.ciphertextHash,
+        etag: chunk.etag,
+      });
+    }
+
     for (const chunk of resolvedChunks) {
-      const sourceObject = await env.FILE_BUCKET.get(chunk.sourceStorageKey);
-      if (!sourceObject) {
-        throw new Error(`missing multipart chunk: ${chunk.sourceStorageKey}`);
+      const sourceObject = await env.FILE_BUCKET.get(chunk.sourceStorageKey, {
+        onlyIf: {
+          etagMatches: chunk.etag,
+        },
+      });
+      if (!sourceObject || !('arrayBuffer' in sourceObject)) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `multipart chunk changed during finalization: ${chunk.sourceStorageKey}`
+        );
       }
 
       await env.FILE_BUCKET.put(chunk.storageKey, await sourceObject.arrayBuffer(), {
@@ -550,17 +628,13 @@ export async function handleFileUploadComplete(request: Request, env: Env): Prom
       });
       finalizedStorageKeys.push(chunk.storageKey);
     }
-
-    await env.FILE_BUCKET.put(completionMarkerKey, '', {
-      customMetadata: {
-        channelUuid: uploadSession.channelUuid,
-        uploadId: parsed.data.uploadId,
-        expiresAt: String(uploadSession.expiresAt),
-      },
-    });
   } catch (error) {
     if (finalizedStorageKeys.length > 0) {
       await env.FILE_BUCKET.delete(finalizedStorageKeys).catch(() => undefined);
+    }
+    await env.FILE_BUCKET.delete(completionMarkerKey).catch(() => undefined);
+    if (error instanceof MultipartCompletionError) {
+      return errorResponse(error.code, error.status);
     }
     throw error;
   }

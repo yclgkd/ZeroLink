@@ -10,7 +10,7 @@ import (
 	"github.com/yclgkd/ZeroLink/services/selfhost-api/internal/store/filestore"
 )
 
-var multipartChunkObjectKeyPattern = regexp.MustCompile(`^files/[^/]+/(?:final/)?\d{4}\.bin$`)
+var multipartChunkObjectKeyPattern = regexp.MustCompile(`^files/[^/]+/(?:final/\d{4}\.bin|\d{4}\.bin|complete)$`)
 
 type MultipartChunkStore interface {
 	ListChunkObjects(context.Context) ([]filestore.ChunkObject, error)

@@ -174,6 +174,14 @@ func (a *proxyTargetAuthorizer) UploadSession(uploadID string) (uploadSession, b
 	return session, true
 }
 
+func (a *proxyTargetAuthorizer) UploadSessionForCompletion(uploadID string) (uploadSession, bool) {
+	session, ok := a.parseUploadSession(uploadID)
+	if !ok || !session.expiresAt.After(a.now()) {
+		return uploadSession{}, false
+	}
+	return session, true
+}
+
 func (a *proxyTargetAuthorizer) UploadTarget(token string) (proxyUploadTarget, bool) {
 	target, ok := a.parseUploadTarget(token)
 	if !ok || a.isUploadRevoked(target.uploadID) || !target.expiresAt.After(a.now()) {

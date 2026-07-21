@@ -521,7 +521,7 @@ func fileCompleteHandler(
 			writeError(logger, w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 			return
 		}
-		session, ok := proxyTargets.UploadSession(input.UploadID)
+		session, ok := proxyTargets.UploadSessionForCompletion(input.UploadID)
 		if !ok {
 			writeError(logger, w, http.StatusBadRequest, "BAD_REQUEST", "upload session expired or not found")
 			return
@@ -569,6 +569,10 @@ func fileCompleteHandler(
 
 		fileRef, err := fileStore.CompleteUpload(r.Context(), input)
 		if err != nil {
+			if errors.Is(err, filestore.ErrUploadInProgress) {
+				writeError(logger, w, http.StatusConflict, "UPLOAD_IN_PROGRESS", "upload finalization in progress")
+				return
+			}
 			writeError(logger, w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 			return
 		}
