@@ -97,7 +97,16 @@ services:
         condition: service_healthy
     ports:
       - "8080:8080"
+    networks:
+      default:
+        ipv4_address: ${SELFHOST_WEB_IP:-172.30.0.2}
 
 volumes:
   postgres-data:
   garage-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${SELFHOST_NETWORK_SUBNET:-172.30.0.0/24}

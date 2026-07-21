@@ -27,6 +27,7 @@ type Runtime struct {
 	server          *http.Server
 	shutdownTimeout time.Duration
 	db              *store.Database
+	maintenanceDB   expiredDataSweeper
 	multipartStore  store.MultipartChunkStore
 	realtime        realtime.Publisher
 	logger          *slog.Logger
@@ -128,6 +129,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Runtime,
 		server:          server,
 		shutdownTimeout: cfg.HTTP.ShutdownTimeout,
 		db:              db,
+		maintenanceDB:   db,
 		multipartStore:  multipartStore,
 		realtime:        realtimeHub,
 		logger:          logger,
@@ -135,9 +137,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Runtime,
 }
 
 func (r *Runtime) Run(ctx context.Context) error {
-	if r.multipartStore != nil {
-		go r.runMaintenanceLoop(ctx)
-	}
+	go r.runMaintenanceLoop(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {
