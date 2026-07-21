@@ -1,7 +1,7 @@
 import type { MultipartFileRef } from '@zerolink/shared';
 import { FILE_UPLOAD_TTL_MS } from './file-storage.ts';
 
-const FILE_CHUNK_KEY_PATTERN = /^files\/([^/]+)\/([^/]+)\/\d{4}\.bin$/u;
+const FILE_CHUNK_KEY_PATTERN = /^files\/([^/]+)\/([^/]+)\/(?:(?:final\/)?\d{4}\.bin|complete)$/u;
 const FILE_LIST_BATCH_SIZE = 1000;
 const FILE_DELETE_BATCH_SIZE = 1000;
 

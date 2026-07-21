@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/yclgkd/ZeroLink/services/selfhost-api/internal/store/filestore"
@@ -80,14 +81,17 @@ type proxyDownloadTargetToken struct {
 }
 
 type proxyTargetAuthorizer struct {
-	now    func() time.Time
-	secret []byte
+	now            func() time.Time
+	secret         []byte
+	revokedMu      sync.Mutex
+	revokedUploads map[string]time.Time
 }
 
 func newProxyTargetAuthorizer(secret string) *proxyTargetAuthorizer {
 	return &proxyTargetAuthorizer{
-		now:    time.Now,
-		secret: []byte(secret),
+		now:            time.Now,
+		secret:         []byte(secret),
+		revokedUploads: make(map[string]time.Time),
 	}
 }
 
@@ -114,6 +118,10 @@ func (a *proxyTargetAuthorizer) IssueUploadSession(
 }
 
 func (a *proxyTargetAuthorizer) IssueUploadTarget(uploadID string, index int, ttl time.Duration) (string, error) {
+	if a.isUploadRevoked(uploadID) {
+		return "", errors.New("upload session revoked")
+	}
+
 	session, ok := a.parseUploadSession(uploadID)
 	if !ok {
 		return "", errors.New("upload session invalid")
@@ -155,6 +163,10 @@ func (a *proxyTargetAuthorizer) IssueDownloadTarget(
 }
 
 func (a *proxyTargetAuthorizer) UploadSession(uploadID string) (uploadSession, bool) {
+	if a.isUploadRevoked(uploadID) {
+		return uploadSession{}, false
+	}
+
 	session, ok := a.parseUploadSession(uploadID)
 	if !ok || !session.expiresAt.After(a.now()) {
 		return uploadSession{}, false
@@ -164,7 +176,7 @@ func (a *proxyTargetAuthorizer) UploadSession(uploadID string) (uploadSession, b
 
 func (a *proxyTargetAuthorizer) UploadTarget(token string) (proxyUploadTarget, bool) {
 	target, ok := a.parseUploadTarget(token)
-	if !ok || !target.expiresAt.After(a.now()) {
+	if !ok || a.isUploadRevoked(target.uploadID) || !target.expiresAt.After(a.now()) {
 		return proxyUploadTarget{}, false
 	}
 	return target, true
@@ -178,7 +190,37 @@ func (a *proxyTargetAuthorizer) DownloadTarget(token string) (proxyDownloadTarge
 	return target, true
 }
 
-func (a *proxyTargetAuthorizer) RevokeUpload(_ string) {
+func (a *proxyTargetAuthorizer) RevokeUpload(uploadID string) {
+	now := a.now().UTC()
+	expiresAt := now.Add(proxyUploadTargetTTL)
+	if session, ok := a.parseUploadSession(uploadID); ok {
+		expiresAt = session.expiresAt
+	}
+
+	a.revokedMu.Lock()
+	defer a.revokedMu.Unlock()
+	for revokedUploadID, revokedUntil := range a.revokedUploads {
+		if !revokedUntil.After(now) {
+			delete(a.revokedUploads, revokedUploadID)
+		}
+	}
+	a.revokedUploads[uploadID] = expiresAt
+}
+
+func (a *proxyTargetAuthorizer) isUploadRevoked(uploadID string) bool {
+	now := a.now().UTC()
+	a.revokedMu.Lock()
+	defer a.revokedMu.Unlock()
+
+	expiresAt, ok := a.revokedUploads[uploadID]
+	if !ok {
+		return false
+	}
+	if !expiresAt.After(now) {
+		delete(a.revokedUploads, uploadID)
+		return false
+	}
+	return true
 }
 
 func (a *proxyTargetAuthorizer) expiresAt(ttl time.Duration, fallback time.Duration) time.Time {

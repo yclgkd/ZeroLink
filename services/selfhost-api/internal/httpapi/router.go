@@ -690,6 +690,10 @@ func fileChunkProxyHandler(
 			int64(len(payload)),
 		)
 		if err != nil {
+			if errors.Is(err, filestore.ErrUploadCompleted) {
+				writeError(logger, w, http.StatusNotFound, "NOT_FOUND", "upload target not found")
+				return
+			}
 			writeError(logger, w, http.StatusBadGateway, "STORAGE_ERROR", err.Error())
 			return
 		}

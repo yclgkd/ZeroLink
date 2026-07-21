@@ -27,6 +27,9 @@ const (
 	channelUUIDLength     = 21
 )
 
+// ErrUploadCompleted indicates that an upload has already been finalized.
+var ErrUploadCompleted = errors.New("upload already completed")
+
 type FileStorageBackend string
 
 const (
@@ -198,6 +201,11 @@ func (s *Store) PutChunk(ctx context.Context, uploadID string, index int, body i
 	if size < 0 {
 		return "", errors.New("chunk size must be non-negative")
 	}
+	if _, err := s.client.StatObject(ctx, s.bucket, finalUploadObjectKey(uploadID, index), minio.StatObjectOptions{}); err == nil {
+		return "", ErrUploadCompleted
+	} else if !isObjectNotFound(err) {
+		return "", fmt.Errorf("check upload completion: %w", err)
+	}
 
 	objectKey := uploadObjectKey(uploadID, index)
 	info, err := s.client.PutObject(ctx, s.bucket, objectKey, body, size, minio.PutObjectOptions{})
@@ -244,6 +252,13 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 			return MultipartFileRef{}, fmt.Errorf("chunks must be ordered from 0 to %d", len(req.Chunks)-1)
 		}
 
+		finalKey := finalUploadObjectKey(uploadID, chunk.Index)
+		if _, err := s.client.StatObject(ctx, s.bucket, finalKey, minio.StatObjectOptions{}); err == nil {
+			return MultipartFileRef{}, ErrUploadCompleted
+		} else if !isObjectNotFound(err) {
+			return MultipartFileRef{}, fmt.Errorf("stat finalized chunk %d: %w", chunk.Index, err)
+		}
+
 		objectKey := uploadObjectKey(uploadID, chunk.Index)
 		stat, err := s.client.StatObject(ctx, s.bucket, objectKey, minio.StatObjectOptions{})
 		if err != nil {
@@ -261,7 +276,7 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 		totalCiphertext += stat.Size
 		chunks[i] = MultipartFileRefChunk{
 			Index:           chunk.Index,
-			StorageKey:      objectKey,
+			StorageKey:      finalKey,
 			CiphertextBytes: stat.Size,
 			CiphertextHash:  chunk.CiphertextHash,
 		}
@@ -269,6 +284,28 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 
 	if totalCiphertext != req.TotalCiphertextBytes {
 		return MultipartFileRef{}, fmt.Errorf("total ciphertext bytes mismatch: got %d want %d", totalCiphertext, req.TotalCiphertextBytes)
+	}
+
+	copiedKeys := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		_, err := s.client.CopyObject(
+			ctx,
+			minio.CopyDestOptions{
+				Bucket: s.bucket,
+				Object: chunk.StorageKey,
+			},
+			minio.CopySrcOptions{
+				Bucket: s.bucket,
+				Object: uploadObjectKey(uploadID, chunk.Index),
+			},
+		)
+		if err != nil {
+			for _, copiedKey := range copiedKeys {
+				_ = s.client.RemoveObject(ctx, s.bucket, copiedKey, minio.RemoveObjectOptions{})
+			}
+			return MultipartFileRef{}, fmt.Errorf("finalize chunk %d: %w", chunk.Index, err)
+		}
+		copiedKeys = append(copiedKeys, chunk.StorageKey)
 	}
 
 	ref := MultipartFileRef{
@@ -522,6 +559,15 @@ func (s *Store) ensureBucket(ctx context.Context) error {
 
 func uploadObjectKey(uploadID string, index int) string {
 	return fmt.Sprintf("%s/%s/%04d.bin", chunkObjectPrefix, uploadID, index)
+}
+
+func finalUploadObjectKey(uploadID string, index int) string {
+	return fmt.Sprintf("%s/%s/final/%04d.bin", chunkObjectPrefix, uploadID, index)
+}
+
+func isObjectNotFound(err error) bool {
+	response := minio.ToErrorResponse(err)
+	return response.StatusCode == http.StatusNotFound || response.Code == "NoSuchKey" || response.Code == "NoSuchObject"
 }
 
 func (s *Store) presignTarget() *minio.Client {

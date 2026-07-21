@@ -35,7 +35,7 @@ func TestCleanupOrphanMultipartChunksDeletesOnlyStaleOrphans(t *testing.T) {
 	resetTestTables(t, db)
 
 	now := time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)
-	activeKey := "files/active-upload/0000.bin"
+	activeKey := "files/active-upload/final/0000.bin"
 	expiredKey := "files/expired-upload/0000.bin"
 	orphanKey := "files/orphan-upload/0000.bin"
 	freshKey := "files/fresh-upload/0000.bin"

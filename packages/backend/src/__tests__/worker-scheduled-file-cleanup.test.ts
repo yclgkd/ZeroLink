@@ -1,6 +1,11 @@
 import type { Base64Url, HexString, MultipartFileRef } from '@zerolink/shared';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildMultipartChunkStorageKey, FILE_UPLOAD_TTL_MS } from '../file-storage.ts';
+import {
+  buildMultipartChunkStorageKey,
+  buildMultipartFinalStorageKey,
+  buildMultipartUploadCompletionMarkerKey,
+  FILE_UPLOAD_TTL_MS,
+} from '../file-storage.ts';
 import type { Env } from '../index.ts';
 import { createMockR2Bucket } from './helpers/r2-fixtures.ts';
 import { dispatchScheduled, OTHER_UUID, VALID_UUID } from './helpers/worker-fixtures.ts';
@@ -75,8 +80,12 @@ describe('backend worker scheduled cleanup', () => {
     const freshUploadId = 'fresh-upload' as Base64Url;
     const foreignUploadId = 'foreign-upload' as Base64Url;
 
-    const activeChunkKey = buildMultipartChunkStorageKey(VALID_UUID, activeUploadId, 0);
+    const activeChunkKey = buildMultipartFinalStorageKey(VALID_UUID, activeUploadId, 0);
     const orphanChunkKey = buildMultipartChunkStorageKey(VALID_UUID, orphanUploadId, 0);
+    const orphanCompletionMarkerKey = buildMultipartUploadCompletionMarkerKey(
+      VALID_UUID,
+      orphanUploadId
+    );
     const freshChunkKey = buildMultipartChunkStorageKey(VALID_UUID, freshUploadId, 0);
     const foreignChunkKey = buildMultipartChunkStorageKey(OTHER_UUID, foreignUploadId, 0);
 
@@ -111,6 +120,7 @@ describe('backend worker scheduled cleanup', () => {
     vi.setSystemTime(staleMs);
     await env.FILE_BUCKET.put(activeChunkKey, activeBody);
     await env.FILE_BUCKET.put(orphanChunkKey, 'orphan-body');
+    await env.FILE_BUCKET.put(orphanCompletionMarkerKey, '');
     await env.FILE_BUCKET.put(foreignChunkKey, 'foreign-body');
 
     vi.setSystemTime(freshMs);
@@ -122,6 +132,7 @@ describe('backend worker scheduled cleanup', () => {
     expect(await env.FILE_BUCKET.head(activeChunkKey)).not.toBeNull();
     expect(await env.FILE_BUCKET.head(freshChunkKey)).not.toBeNull();
     expect(await env.FILE_BUCKET.head(orphanChunkKey)).toBeNull();
+    expect(await env.FILE_BUCKET.head(orphanCompletionMarkerKey)).toBeNull();
     expect(await env.FILE_BUCKET.head(foreignChunkKey)).toBeNull();
   });
 });

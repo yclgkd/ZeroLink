@@ -156,6 +156,17 @@ describe('backend worker routing — file upload and fetch routes', () => {
     expect(completeResponse.status).toBe(200);
     expect(completePayload.fileRef.storageBackend).toBe('r2');
     expect(completePayload.fileRef.chunks).toHaveLength(2);
+    expect(completePayload.fileRef.chunks[0]?.storageKey).toContain('/final/');
+    expect(completePayload.fileRef.chunks[1]?.storageKey).toContain('/final/');
+
+    const lateChunkResponse = await dispatch(
+      env,
+      `/api/file/chunk/${VALID_UUID}/${initiatePayload.uploadId}/0`,
+      'PUT',
+      'late',
+      true
+    );
+    expect(lateChunkResponse.status).toBe(404);
 
     currentFileRef = completePayload.fileRef;
     currentCipherVersion = 0;
