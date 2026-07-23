@@ -2,12 +2,14 @@ package filestore
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,16 +20,20 @@ import (
 )
 
 type fakeS3Object struct {
-	etag string
-	size int64
+	etag     string
+	size     int64
+	metadata http.Header
 }
 
 type fakeS3Server struct {
-	t                      *testing.T
-	mu                     sync.Mutex
-	objects                map[string]fakeS3Object
-	mutateSourceBeforeCopy bool
-	copySourceIfMatches    []string
+	t                           *testing.T
+	mu                          sync.Mutex
+	objects                     map[string]fakeS3Object
+	mutateSourceBeforeCopy      bool
+	cancelBeforeCopy            context.CancelFunc
+	completionMarkerConflicts   int
+	completionMarkerPutAttempts int
+	copySourceIfMatches         []string
 }
 
 func newFakeS3Server(t *testing.T) *fakeS3Server {
@@ -58,6 +64,12 @@ func (s *fakeS3Server) sourceObjectKey(r *http.Request) string {
 	return key
 }
 
+func writeS3Error(w http.ResponseWriter, status int, code string) {
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, "<Error><Code>%s</Code><Message>%s</Message></Error>", code, code)
+}
+
 func (s *fakeS3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,21 +90,54 @@ func (s *fakeS3Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", fmt.Sprintf("%q", object.etag))
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", object.size))
 		w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+		for name, values := range object.metadata {
+			for _, value := range values {
+				w.Header().Add(name, value)
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 	case http.MethodPut:
 		if r.Header.Get("X-Amz-Copy-Source") == "" {
 			key := s.objectKey(r)
-			if r.Header.Get("If-None-Match") == "*" && s.objects[key].etag != "" {
-				w.WriteHeader(http.StatusPreconditionFailed)
+			object, exists := s.objects[key]
+			if key == completionObjectKey("upload-1") {
+				s.completionMarkerPutAttempts++
+				if s.completionMarkerConflicts > 0 {
+					s.completionMarkerConflicts--
+					writeS3Error(w, http.StatusConflict, "ConditionalRequestConflict")
+					return
+				}
+			}
+			if r.Header.Get("If-None-Match") == "*" && exists {
+				writeS3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
+				return
+			}
+			if match := r.Header.Get("If-Match"); match != "" &&
+				(!exists || strings.Trim(match, "\"") != object.etag) {
+				writeS3Error(w, http.StatusPreconditionFailed, "PreconditionFailed")
 				return
 			}
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				s.t.Fatalf("read put body: %v", err)
 			}
-			s.objects[key] = fakeS3Object{etag: "marker-etag", size: int64(len(body))}
-			w.Header().Set("ETag", `"marker-etag"`)
+			etag := fmt.Sprintf("%x", sha256.Sum256(body))
+			metadata := make(http.Header)
+			for name, values := range r.Header {
+				if strings.HasPrefix(strings.ToLower(name), "x-amz-meta-") {
+					metadata[name] = append([]string(nil), values...)
+				}
+			}
+			s.objects[key] = fakeS3Object{etag: etag, size: int64(len(body)), metadata: metadata}
+			w.Header().Set("ETag", fmt.Sprintf("%q", etag))
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if s.cancelBeforeCopy != nil {
+			cancel := s.cancelBeforeCopy
+			s.cancelBeforeCopy = nil
+			cancel()
+			writeS3Error(w, http.StatusInternalServerError, "InternalError")
 			return
 		}
 		sourceKey := s.sourceObjectKey(r)
@@ -203,6 +248,89 @@ func TestCompleteUploadIsIdempotentAfterFinalization(t *testing.T) {
 	}
 	if !reflect.DeepEqual(first, second) {
 		t.Fatalf("file refs differ: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestCompleteUploadRejectsRetryWithDifferentPayload(t *testing.T) {
+	fake := newFakeS3Server(t)
+	fake.objects[uploadObjectKey("upload-1", 0)] = fakeS3Object{etag: "etag-0", size: 24}
+	store, server := newTestS3Store(t, fake)
+	defer server.Close()
+
+	request := testCompleteUploadRequest()
+	if _, err := store.CompleteUpload(context.Background(), request); err != nil {
+		t.Fatalf("first CompleteUpload() error = %v", err)
+	}
+
+	request.BaseIV = "ZGlmZmVyZW50LWl2"
+	if _, err := store.CompleteUpload(context.Background(), request); err == nil {
+		t.Fatal("retry CompleteUpload() error = nil, want payload mismatch")
+	}
+}
+
+func TestCompleteUploadReleasesMarkerAfterContextCancellation(t *testing.T) {
+	fake := newFakeS3Server(t)
+	fake.objects[uploadObjectKey("upload-1", 0)] = fakeS3Object{etag: "etag-0", size: 24}
+	store, server := newTestS3Store(t, fake)
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	fake.cancelBeforeCopy = cancel
+	if _, err := store.CompleteUpload(ctx, testCompleteUploadRequest()); err == nil {
+		t.Fatal("interrupted CompleteUpload() error = nil, want cancellation")
+	}
+	if _, ok := fake.objects[completionObjectKey("upload-1")]; !ok {
+		t.Fatal("completion marker missing after interrupted request")
+	}
+
+	if _, err := store.CompleteUpload(context.Background(), testCompleteUploadRequest()); err != nil {
+		t.Fatalf("retry CompleteUpload() error = %v", err)
+	}
+}
+
+func TestCompleteUploadReclaimsExpiredMarker(t *testing.T) {
+	fake := newFakeS3Server(t)
+	fake.objects[uploadObjectKey("upload-1", 0)] = fakeS3Object{etag: "etag-0", size: 24}
+	request := testCompleteUploadRequest()
+	fingerprint, err := uploadCompletionRequestFingerprint(request)
+	if err != nil {
+		t.Fatalf("uploadCompletionRequestFingerprint() error = %v", err)
+	}
+	fake.objects[completionObjectKey("upload-1")] = fakeS3Object{
+		etag: "stale-marker",
+		size: 1,
+		metadata: http.Header{
+			"X-Amz-Meta-" + uploadCompletionStateMetadata: {
+				string(uploadCompletionInProgress),
+			},
+			"X-Amz-Meta-" + uploadCompletionFingerprintMetadata: {
+				fingerprint,
+			},
+			"X-Amz-Meta-" + uploadCompletionLeaseExpiresAtMetadata: {
+				strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10),
+			},
+		},
+	}
+	store, server := newTestS3Store(t, fake)
+	defer server.Close()
+
+	if _, err := store.CompleteUpload(context.Background(), request); err != nil {
+		t.Fatalf("CompleteUpload() error = %v", err)
+	}
+}
+
+func TestCompleteUploadRetriesConditionalRequestConflict(t *testing.T) {
+	fake := newFakeS3Server(t)
+	fake.objects[uploadObjectKey("upload-1", 0)] = fakeS3Object{etag: "etag-0", size: 24}
+	fake.completionMarkerConflicts = 1
+	store, server := newTestS3Store(t, fake)
+	defer server.Close()
+
+	if _, err := store.CompleteUpload(context.Background(), testCompleteUploadRequest()); err != nil {
+		t.Fatalf("CompleteUpload() error = %v", err)
+	}
+	if fake.completionMarkerPutAttempts < 2 {
+		t.Fatalf("completion marker put attempts = %d, want at least 2", fake.completionMarkerPutAttempts)
 	}
 }
 

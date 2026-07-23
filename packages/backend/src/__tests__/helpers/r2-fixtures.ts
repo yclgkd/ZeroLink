@@ -138,6 +138,15 @@ export function createMockR2Bucket(initialObjects?: Record<string, string>): R2B
       ) {
         return null;
       }
+      if (
+        onlyIf &&
+        !(onlyIf instanceof Headers) &&
+        'etagMatches' in onlyIf &&
+        onlyIf.etagMatches &&
+        objects.get(key)?.etag !== onlyIf.etagMatches
+      ) {
+        return null;
+      }
 
       const bytes = await toUint8Array(value);
       const etag = await createEtag(bytes);

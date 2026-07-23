@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -22,10 +24,16 @@ import (
 )
 
 const (
-	defaultUploadURLTTL   = 15 * time.Minute
-	defaultDownloadURLTTL = 5 * time.Minute
-	chunkObjectPrefix     = "files"
-	channelUUIDLength     = 21
+	defaultUploadURLTTL                    = 15 * time.Minute
+	defaultDownloadURLTTL                  = 5 * time.Minute
+	uploadCompletionLeaseDuration          = 5 * time.Minute
+	uploadCompletionCleanupTimeout         = 10 * time.Second
+	uploadCompletionMarkerAcquireAttempts  = 4
+	uploadCompletionStateMetadata          = "zerolink-completion-state"
+	uploadCompletionFingerprintMetadata    = "zerolink-request-fingerprint"
+	uploadCompletionLeaseExpiresAtMetadata = "zerolink-lease-expires-at"
+	chunkObjectPrefix                      = "files"
+	channelUUIDLength                      = 21
 )
 
 // ErrUploadCompleted indicates that an upload has already been finalized.
@@ -33,6 +41,28 @@ var ErrUploadCompleted = errors.New("upload already completed")
 
 // ErrUploadInProgress indicates that another request is finalizing the upload.
 var ErrUploadInProgress = errors.New("upload finalization in progress")
+
+var errUploadCompletionMismatch = errors.New("upload completion payload does not match the original request")
+
+type uploadCompletionMarkerState string
+
+const (
+	uploadCompletionInProgress uploadCompletionMarkerState = "in_progress"
+	uploadCompletionCompleted  uploadCompletionMarkerState = "completed"
+	uploadCompletionReleased   uploadCompletionMarkerState = "released"
+)
+
+type uploadCompletionMarker struct {
+	state              uploadCompletionMarkerState
+	requestFingerprint string
+	leaseExpiresAt     time.Time
+}
+
+type uploadCompletionMarkerAcquisition struct {
+	owned     bool
+	completed bool
+	etag      string
+}
 
 type FileStorageBackend string
 
@@ -247,36 +277,36 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 	if err := req.Validate(); err != nil {
 		return MultipartFileRef{}, err
 	}
-
-	uploadID := req.UploadID
-	markerOwned, err := s.acquireUploadCompletionMarker(ctx, uploadID)
-	if err != nil {
-		return MultipartFileRef{}, err
-	}
-	keepMarker := false
-	defer func() {
-		if markerOwned && !keepMarker {
-			_ = s.client.RemoveObject(ctx, s.bucket, completionObjectKey(uploadID), minio.RemoveObjectOptions{})
-		}
-	}()
-
-	chunks := make([]MultipartFileRefChunk, len(req.Chunks))
-	sourceETags := make([]string, len(req.Chunks))
-	finalizedChunks := make([]bool, len(req.Chunks))
-	var totalCiphertext int64
 	for i, chunk := range req.Chunks {
 		if chunk.Index != i {
 			return MultipartFileRef{}, fmt.Errorf("chunks must be ordered from 0 to %d", len(req.Chunks)-1)
 		}
+	}
 
-		finalKey := finalUploadObjectKey(uploadID, chunk.Index)
-		finalStat, finalErr := s.client.StatObject(ctx, s.bucket, finalKey, minio.StatObjectOptions{})
-		if finalErr == nil {
+	uploadID := req.UploadID
+	requestFingerprint, err := uploadCompletionRequestFingerprint(req)
+	if err != nil {
+		return MultipartFileRef{}, err
+	}
+	marker, err := s.acquireUploadCompletionMarker(ctx, uploadID, requestFingerprint)
+	if err != nil {
+		return MultipartFileRef{}, err
+	}
+
+	if marker.completed {
+		chunks := make([]MultipartFileRefChunk, len(req.Chunks))
+		var totalCiphertext int64
+		for i, chunk := range req.Chunks {
+			finalKey := finalUploadObjectKey(uploadID, chunk.Index)
+			finalStat, err := s.client.StatObject(ctx, s.bucket, finalKey, minio.StatObjectOptions{})
+			if err != nil {
+				if isObjectNotFound(err) {
+					return MultipartFileRef{}, ErrUploadInProgress
+				}
+				return MultipartFileRef{}, fmt.Errorf("stat finalized chunk %d: %w", chunk.Index, err)
+			}
 			if finalStat.Size != chunk.CiphertextBytes {
 				return MultipartFileRef{}, fmt.Errorf("finalized chunk %d ciphertext bytes mismatch", chunk.Index)
-			}
-			if normalizeETag(finalStat.ETag) != normalizeETag(chunk.ETag) {
-				return MultipartFileRef{}, fmt.Errorf("finalized chunk %d etag mismatch", chunk.Index)
 			}
 			totalCiphertext += finalStat.Size
 			chunks[i] = MultipartFileRefChunk{
@@ -285,14 +315,50 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 				CiphertextBytes: finalStat.Size,
 				CiphertextHash:  chunk.CiphertextHash,
 			}
-			finalizedChunks[i] = true
-			continue
-		} else if !isObjectNotFound(finalErr) {
-			return MultipartFileRef{}, fmt.Errorf("stat finalized chunk %d: %w", chunk.Index, finalErr)
-		} else if !markerOwned {
-			return MultipartFileRef{}, ErrUploadInProgress
+		}
+		if totalCiphertext != req.TotalCiphertextBytes {
+			return MultipartFileRef{}, fmt.Errorf("total ciphertext bytes mismatch: got %d want %d", totalCiphertext, req.TotalCiphertextBytes)
 		}
 
+		ref := MultipartFileRef{
+			StorageBackend:       FileStorageBackendS3,
+			ChunkSizeBytes:       req.ChunkSizeBytes,
+			ChunkCount:           len(chunks),
+			TotalPlaintextBytes:  req.TotalPlaintextBytes,
+			TotalCiphertextBytes: totalCiphertext,
+			BaseIV:               req.BaseIV,
+			EncContentKey:        req.EncContentKey,
+			Chunks:               chunks,
+		}
+		if err := ref.Validate(); err != nil {
+			return MultipartFileRef{}, err
+		}
+		return ref, nil
+	}
+
+	completionFinished := false
+	defer func() {
+		if marker.owned && !completionFinished {
+			cleanupCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx),
+				uploadCompletionCleanupTimeout,
+			)
+			defer cancel()
+			_, _ = s.transitionUploadCompletionMarker(
+				cleanupCtx,
+				uploadID,
+				requestFingerprint,
+				marker.etag,
+				uploadCompletionReleased,
+			)
+		}
+	}()
+
+	chunks := make([]MultipartFileRefChunk, len(req.Chunks))
+	sourceETags := make([]string, len(req.Chunks))
+	var totalCiphertext int64
+	for i, chunk := range req.Chunks {
+		finalKey := finalUploadObjectKey(uploadID, chunk.Index)
 		objectKey := uploadObjectKey(uploadID, chunk.Index)
 		stat, err := s.client.StatObject(ctx, s.bucket, objectKey, minio.StatObjectOptions{})
 		if err != nil {
@@ -321,11 +387,7 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 		return MultipartFileRef{}, fmt.Errorf("total ciphertext bytes mismatch: got %d want %d", totalCiphertext, req.TotalCiphertextBytes)
 	}
 
-	copiedKeys := make([]string, 0, len(chunks))
 	for i, chunk := range chunks {
-		if finalizedChunks[i] {
-			continue
-		}
 		_, err := s.client.CopyObject(
 			ctx,
 			minio.CopyDestOptions{
@@ -339,12 +401,8 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 			},
 		)
 		if err != nil {
-			for _, copiedKey := range copiedKeys {
-				_ = s.client.RemoveObject(ctx, s.bucket, copiedKey, minio.RemoveObjectOptions{})
-			}
 			return MultipartFileRef{}, fmt.Errorf("finalize chunk %d: %w", chunk.Index, err)
 		}
-		copiedKeys = append(copiedKeys, chunk.StorageKey)
 	}
 
 	ref := MultipartFileRef{
@@ -360,28 +418,204 @@ func (s *Store) CompleteUpload(ctx context.Context, req FileUploadCompleteReques
 	if err := ref.Validate(); err != nil {
 		return MultipartFileRef{}, err
 	}
-	keepMarker = true
+	if _, err := s.transitionUploadCompletionMarker(
+		ctx,
+		uploadID,
+		requestFingerprint,
+		marker.etag,
+		uploadCompletionCompleted,
+	); err != nil {
+		if isConditionalWriteConflict(err) {
+			return MultipartFileRef{}, ErrUploadInProgress
+		}
+		return MultipartFileRef{}, fmt.Errorf("complete upload marker: %w", err)
+	}
+	completionFinished = true
 	return ref, nil
 }
 
-func (s *Store) acquireUploadCompletionMarker(ctx context.Context, uploadID string) (bool, error) {
-	options := minio.PutObjectOptions{DisableMultipart: true}
-	options.SetMatchETagExcept("*")
-	_, err := s.client.PutObject(
+func uploadCompletionRequestFingerprint(req FileUploadCompleteRequest) (string, error) {
+	canonical := req
+	canonical.Chunks = append([]FileUploadCompleteChunk(nil), req.Chunks...)
+	for i := range canonical.Chunks {
+		canonical.Chunks[i].ETag = normalizeETag(canonical.Chunks[i].ETag)
+	}
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("encode upload completion fingerprint: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func uploadCompletionMetadataValue(info minio.ObjectInfo, key string) string {
+	if value := info.Metadata.Get("X-Amz-Meta-" + key); value != "" {
+		return value
+	}
+	for name, value := range info.UserMetadata {
+		if strings.EqualFold(name, key) || strings.EqualFold(name, "X-Amz-Meta-"+key) {
+			return value
+		}
+	}
+	return ""
+}
+
+func parseUploadCompletionMarker(info minio.ObjectInfo) (uploadCompletionMarker, bool) {
+	state := uploadCompletionMarkerState(
+		uploadCompletionMetadataValue(info, uploadCompletionStateMetadata),
+	)
+	if state != uploadCompletionInProgress &&
+		state != uploadCompletionCompleted &&
+		state != uploadCompletionReleased {
+		return uploadCompletionMarker{}, false
+	}
+	requestFingerprint := uploadCompletionMetadataValue(
+		info,
+		uploadCompletionFingerprintMetadata,
+	)
+	leaseExpiresAtMillis, err := strconv.ParseInt(
+		uploadCompletionMetadataValue(info, uploadCompletionLeaseExpiresAtMetadata),
+		10,
+		64,
+	)
+	if err != nil || requestFingerprint == "" {
+		return uploadCompletionMarker{}, false
+	}
+	return uploadCompletionMarker{
+		state:              state,
+		requestFingerprint: requestFingerprint,
+		leaseExpiresAt:     time.UnixMilli(leaseExpiresAtMillis),
+	}, true
+}
+
+func (s *Store) putUploadCompletionMarker(
+	ctx context.Context,
+	uploadID string,
+	requestFingerprint string,
+	state uploadCompletionMarkerState,
+	matchETag string,
+	createOnly bool,
+) (minio.UploadInfo, error) {
+	nonce, err := randomBase64URL(16)
+	if err != nil {
+		return minio.UploadInfo{}, err
+	}
+	body := []byte(fmt.Sprintf("%s:%s:%s", state, requestFingerprint, nonce))
+	leaseExpiresAt := time.Now()
+	if state == uploadCompletionInProgress {
+		leaseExpiresAt = leaseExpiresAt.Add(uploadCompletionLeaseDuration)
+	}
+	options := minio.PutObjectOptions{
+		DisableMultipart: true,
+		UserMetadata: map[string]string{
+			uploadCompletionStateMetadata:          string(state),
+			uploadCompletionFingerprintMetadata:    requestFingerprint,
+			uploadCompletionLeaseExpiresAtMetadata: strconv.FormatInt(leaseExpiresAt.UnixMilli(), 10),
+		},
+	}
+	if createOnly {
+		options.SetMatchETagExcept("*")
+	} else {
+		options.SetMatchETag(normalizeETag(matchETag))
+	}
+	return s.client.PutObject(
 		ctx,
 		s.bucket,
 		completionObjectKey(uploadID),
-		bytes.NewReader(nil),
-		0,
+		bytes.NewReader(body),
+		int64(len(body)),
 		options,
 	)
-	if err == nil {
-		return true, nil
+}
+
+func (s *Store) acquireUploadCompletionMarker(
+	ctx context.Context,
+	uploadID string,
+	requestFingerprint string,
+) (uploadCompletionMarkerAcquisition, error) {
+	markerKey := completionObjectKey(uploadID)
+	for attempt := 0; attempt < uploadCompletionMarkerAcquireAttempts; attempt++ {
+		info, err := s.client.StatObject(ctx, s.bucket, markerKey, minio.StatObjectOptions{})
+		if err != nil {
+			if !isObjectNotFound(err) {
+				return uploadCompletionMarkerAcquisition{}, fmt.Errorf("stat upload completion marker: %w", err)
+			}
+			created, err := s.putUploadCompletionMarker(
+				ctx,
+				uploadID,
+				requestFingerprint,
+				uploadCompletionInProgress,
+				"",
+				true,
+			)
+			if err == nil {
+				return uploadCompletionMarkerAcquisition{
+					owned: true,
+					etag:  normalizeETag(created.ETag),
+				}, nil
+			}
+			if isConditionalWriteConflict(err) {
+				continue
+			}
+			return uploadCompletionMarkerAcquisition{}, fmt.Errorf("acquire upload completion marker: %w", err)
+		}
+
+		current, ok := parseUploadCompletionMarker(info)
+		if !ok {
+			return uploadCompletionMarkerAcquisition{}, ErrUploadInProgress
+		}
+		if current.state == uploadCompletionCompleted {
+			if current.requestFingerprint != requestFingerprint {
+				return uploadCompletionMarkerAcquisition{}, errUploadCompletionMismatch
+			}
+			return uploadCompletionMarkerAcquisition{completed: true}, nil
+		}
+		if current.state == uploadCompletionInProgress {
+			if current.requestFingerprint != requestFingerprint {
+				return uploadCompletionMarkerAcquisition{}, errUploadCompletionMismatch
+			}
+			if current.leaseExpiresAt.After(time.Now()) {
+				return uploadCompletionMarkerAcquisition{}, ErrUploadInProgress
+			}
+		}
+
+		claimed, err := s.putUploadCompletionMarker(
+			ctx,
+			uploadID,
+			requestFingerprint,
+			uploadCompletionInProgress,
+			info.ETag,
+			false,
+		)
+		if err == nil {
+			return uploadCompletionMarkerAcquisition{
+				owned: true,
+				etag:  normalizeETag(claimed.ETag),
+			}, nil
+		}
+		if isConditionalWriteConflict(err) {
+			continue
+		}
+		return uploadCompletionMarkerAcquisition{}, fmt.Errorf("claim upload completion marker: %w", err)
 	}
-	if isPreconditionFailed(err) {
-		return false, nil
-	}
-	return false, fmt.Errorf("acquire upload completion marker: %w", err)
+	return uploadCompletionMarkerAcquisition{}, ErrUploadInProgress
+}
+
+func (s *Store) transitionUploadCompletionMarker(
+	ctx context.Context,
+	uploadID string,
+	requestFingerprint string,
+	ownerETag string,
+	state uploadCompletionMarkerState,
+) (minio.UploadInfo, error) {
+	return s.putUploadCompletionMarker(
+		ctx,
+		uploadID,
+		requestFingerprint,
+		state,
+		ownerETag,
+		false,
+	)
 }
 
 func (s *Store) PresignedDownload(ctx context.Context, fileRef MultipartFileRef, index int, ttl time.Duration) (string, error) {
@@ -634,9 +868,12 @@ func isObjectNotFound(err error) bool {
 	return response.StatusCode == http.StatusNotFound || response.Code == "NoSuchKey" || response.Code == "NoSuchObject"
 }
 
-func isPreconditionFailed(err error) bool {
+func isConditionalWriteConflict(err error) bool {
 	response := minio.ToErrorResponse(err)
-	return response.StatusCode == http.StatusPreconditionFailed || response.Code == "PreconditionFailed"
+	return response.StatusCode == http.StatusPreconditionFailed ||
+		response.Code == "PreconditionFailed" ||
+		(response.StatusCode == http.StatusConflict &&
+			response.Code == "ConditionalRequestConflict")
 }
 
 func (s *Store) presignTarget() *minio.Client {
