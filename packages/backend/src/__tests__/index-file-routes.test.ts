@@ -729,6 +729,23 @@ describe('backend worker routing — file upload and fetch routes', () => {
     expect(pullCount).toBe(2);
   });
 
+  it('cancels request bodies rejected by Content-Length', async () => {
+    let cancelCount = 0;
+    const request = {
+      headers: new Headers({ 'Content-Length': '25' }),
+      body: new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelCount += 1;
+        },
+      }),
+    } as unknown as Request;
+
+    const bytes = await readRequestBytesUpToLimit(request, 24);
+
+    expect(bytes).toBeNull();
+    expect(cancelCount).toBe(1);
+  });
+
   it('rejects expired upload sessions on complete', async () => {
     const { env } = createMockEnv(async () => {
       return new Response(JSON.stringify({ ok: false, code: 'UNEXPECTED' }), { status: 500 });

@@ -176,47 +176,47 @@ export class SecretVault implements VaultContext {
 
       if (url.pathname === '/create_begin') {
         handler = 'create_begin';
-        return this.handleCreateBegin(request);
+        return await this.handleCreateBegin(request);
       }
 
       if (url.pathname === '/create_finish') {
         handler = 'create_finish';
-        return this.handleCreateFinish(request);
+        return await this.handleCreateFinish(request);
       }
 
       if (url.pathname === '/lock_begin') {
         handler = 'lock_begin';
-        return handleLockBegin(this, request);
+        return await handleLockBegin(this, request);
       }
 
       if (url.pathname === '/lock_commit') {
         handler = 'lock_commit';
-        return handleLockCommit(this, request);
+        return await handleLockCommit(this, request);
       }
 
       if (url.pathname === '/compound_begin') {
         handler = 'compound_begin';
-        return handleCompoundBegin(this, request);
+        return await handleCompoundBegin(this, request);
       }
 
       if (url.pathname === '/compound_commit') {
         handler = 'compound_commit';
-        return handleCompoundCommit(this, request);
+        return await handleCompoundCommit(this, request);
       }
 
       if (url.pathname === '/get_public_state') {
         handler = 'get_public_state';
-        return handleGetPublicState(this);
+        return await handleGetPublicState(this);
       }
 
       if (url.pathname === '/get_decrypt_payload') {
         handler = 'get_decrypt_payload';
-        return handleGetDecryptPayload(this);
+        return await handleGetDecryptPayload(this);
       }
 
       if (url.pathname === '/get_file_payload') {
         handler = 'get_file_payload';
-        return handleGetFilePayload(this);
+        return await handleGetFilePayload(this);
       }
 
       handler = 'not_found';

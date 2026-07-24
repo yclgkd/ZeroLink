@@ -1,6 +1,6 @@
 import type { AssertionJSON, ChannelRecord } from '@zerolink/shared';
 import { CHANNEL_STATE } from '@zerolink/shared';
-import { readJsonBody as readLimitedJsonBody } from '../request-body.ts';
+import { RequestBodyTooLargeError, readJsonBody as readLimitedJsonBody } from '../request-body.ts';
 import type {
   ErrorResponse,
   LooseAssertionJson,
@@ -185,7 +185,10 @@ export function notFound(): Response {
 export async function readJsonBody(request: Request): Promise<unknown | null> {
   try {
     return await readLimitedJsonBody(request);
-  } catch {
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      throw error;
+    }
     return null;
   }
 }
@@ -218,6 +221,10 @@ export function normalizeAssertion(assertion: LooseAssertionJson): AssertionJSON
 // ---------------------------------------------------------------------------
 
 export function mapError(error: unknown, context: ErrorLogContext): Response {
+  if (error instanceof RequestBodyTooLargeError) {
+    return jsonError('PAYLOAD_TOO_LARGE', 413);
+  }
+
   if (error instanceof StateTransitionError) {
     return mapStateTransitionError(error);
   }

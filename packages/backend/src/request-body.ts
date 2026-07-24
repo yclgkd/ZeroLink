@@ -19,6 +19,10 @@ export async function readRequestBytesUpToLimit(
   if (contentLengthHeader != null && contentLengthHeader.trim() !== '') {
     const contentLength = Number.parseInt(contentLengthHeader, 10);
     if (!Number.isNaN(contentLength) && contentLength > limit) {
+      const body = request.body;
+      if (body) {
+        await body.cancel().catch(() => undefined);
+      }
       return null;
     }
   }
