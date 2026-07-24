@@ -26,6 +26,7 @@ import {
   parseFileDownloadToken,
   parseFileUploadId,
 } from './file-storage.ts';
+import { readJsonBody, readRequestBytesUpToLimit } from './request-body.ts';
 import type { Env } from './worker.ts';
 
 const AES_GCM_TAG_BYTES = AES_GCM.TAG_LENGTH_BITS / 8;
@@ -248,59 +249,7 @@ function errorResponse(code: string, status: number, extraHeaders?: HeadersInit)
   return jsonResponse({ ok: false, code }, status, extraHeaders);
 }
 
-export async function readRequestBytesUpToLimit(
-  request: Request,
-  limit: number
-): Promise<Uint8Array | null> {
-  if (!Number.isInteger(limit) || limit <= 0) {
-    throw new Error('limit must be a positive integer');
-  }
-
-  const contentLengthHeader = request.headers.get('Content-Length');
-  if (contentLengthHeader != null && contentLengthHeader.trim() !== '') {
-    const contentLength = Number.parseInt(contentLengthHeader, 10);
-    if (!Number.isNaN(contentLength) && contentLength > limit) {
-      return null;
-    }
-  }
-
-  if (!request.body) {
-    return new Uint8Array();
-  }
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (!value || value.byteLength === 0) {
-        continue;
-      }
-
-      totalBytes += value.byteLength;
-      if (totalBytes > limit) {
-        await reader.cancel();
-        return null;
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const output = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
-}
+export { readRequestBytesUpToLimit } from './request-body.ts';
 
 function resolveMaxMultipartCiphertextBytes(maxFileBytes: number, chunkCount: number): number {
   return resolveInlineFilePlaintextBytes(maxFileBytes) + chunkCount * AES_GCM_TAG_BYTES;
@@ -371,14 +320,6 @@ function enforceFileUploadInitiateRateLimit(env: Env, subject: string, now: numb
 
   existing.count += 1;
   return null;
-}
-
-async function readJsonBody(request: Request): Promise<unknown | null> {
-  try {
-    return await request.json();
-  } catch {
-    return null;
-  }
 }
 
 interface FilePayloadLookupSuccess {

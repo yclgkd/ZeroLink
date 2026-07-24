@@ -1,5 +1,6 @@
 import type { AssertionJSON, ChannelRecord } from '@zerolink/shared';
 import { CHANNEL_STATE } from '@zerolink/shared';
+import { readJsonBody as readLimitedJsonBody } from '../request-body.ts';
 import type {
   ErrorResponse,
   LooseAssertionJson,
@@ -183,7 +184,7 @@ export function notFound(): Response {
 
 export async function readJsonBody(request: Request): Promise<unknown | null> {
   try {
-    return await request.json();
+    return await readLimitedJsonBody(request);
   } catch {
     return null;
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-
+import { MAX_JSON_BODY_BYTES } from '../request-body.ts';
 import {
   type ApiErrorResponse,
   computeCallerKey,
@@ -374,6 +374,20 @@ describe('backend worker routing — lock begin/commit forwarding + cookie signa
 
     expect(response.status).toBe(400);
     expect(payload.code).toBe('BAD_REQUEST');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects oversized JSON bodies before forwarding lock_begin', async () => {
+    const { env, calls } = createMockEnv(async () => {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const body = JSON.stringify({ uuid: VALID_UUID, padding: 'x'.repeat(MAX_JSON_BODY_BYTES + 1) });
+
+    const response = await dispatch(env, `/api/lock_begin/${VALID_UUID}`, 'POST', body, true);
+    const payload = (await response.json()) as ApiErrorResponse;
+
+    expect(response.status).toBe(413);
+    expect(payload.code).toBe('PAYLOAD_TOO_LARGE');
     expect(calls).toHaveLength(0);
   });
 

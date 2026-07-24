@@ -26,6 +26,7 @@ import {
   handleFileUploadComplete,
   handleFileUploadInitiate,
 } from './file-routes.ts';
+import { RequestBodyTooLargeError, readJsonBody } from './request-body.ts';
 import { applySecurityHeaders } from './security-headers.ts';
 
 export interface Env {
@@ -201,14 +202,6 @@ function preflight(): Response {
     status: 204,
     headers: buildApiHeaders(),
   });
-}
-
-async function readJsonBody(request: Request): Promise<unknown | null> {
-  try {
-    return await request.json();
-  } catch {
-    return null;
-  }
 }
 
 function toJsonObject(value: unknown): Record<string, unknown> | null {
@@ -664,7 +657,10 @@ const worker: ExportedHandler<Env> = {
       }
 
       return await handleApiRequest(request, url.pathname, env);
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return errorResponse('PAYLOAD_TOO_LARGE', 413);
+      }
       return errorResponse('INTERNAL_ERROR', 500);
     }
   },
