@@ -35,9 +35,10 @@ func TestCleanupOrphanMultipartChunksDeletesOnlyStaleOrphans(t *testing.T) {
 	resetTestTables(t, db)
 
 	now := time.Date(2026, 4, 12, 10, 0, 0, 0, time.UTC)
-	activeKey := "files/active-upload/0000.bin"
+	activeKey := "files/active-upload/final/0000.bin"
 	expiredKey := "files/expired-upload/0000.bin"
 	orphanKey := "files/orphan-upload/0000.bin"
+	orphanCompletionMarkerKey := "files/orphan-upload/complete"
 	freshKey := "files/fresh-upload/0000.bin"
 	malformedKey := "files/not-a-chunk"
 
@@ -69,6 +70,7 @@ func TestCleanupOrphanMultipartChunksDeletesOnlyStaleOrphans(t *testing.T) {
 			{Key: activeKey, LastModified: now.Add(-30 * time.Minute)},
 			{Key: expiredKey, LastModified: now.Add(-30 * time.Minute)},
 			{Key: orphanKey, LastModified: now.Add(-30 * time.Minute)},
+			{Key: orphanCompletionMarkerKey, LastModified: now.Add(-30 * time.Minute)},
 			{Key: freshKey, LastModified: now.Add(-5 * time.Minute)},
 			{Key: malformedKey, LastModified: now.Add(-30 * time.Minute)},
 		},
@@ -85,11 +87,11 @@ func TestCleanupOrphanMultipartChunksDeletesOnlyStaleOrphans(t *testing.T) {
 		t.Fatalf("CleanupOrphanMultipartChunks() error = %v", err)
 	}
 
-	if summary.ScannedObjects != 5 {
-		t.Fatalf("summary.ScannedObjects = %d, want 5", summary.ScannedObjects)
+	if summary.ScannedObjects != 6 {
+		t.Fatalf("summary.ScannedObjects = %d, want 6", summary.ScannedObjects)
 	}
-	if summary.DeletedObjects != 2 {
-		t.Fatalf("summary.DeletedObjects = %d, want 2", summary.DeletedObjects)
+	if summary.DeletedObjects != 3 {
+		t.Fatalf("summary.DeletedObjects = %d, want 3", summary.DeletedObjects)
 	}
 	if summary.KeptActiveObjects != 1 {
 		t.Fatalf("summary.KeptActiveObjects = %d, want 1", summary.KeptActiveObjects)
@@ -106,7 +108,7 @@ func TestCleanupOrphanMultipartChunksDeletesOnlyStaleOrphans(t *testing.T) {
 	}
 	deletedKeys := append([]string(nil), chunkStore.deletedBatches[0]...)
 	sort.Strings(deletedKeys)
-	wantDeleted := []string{expiredKey, orphanKey}
+	wantDeleted := []string{expiredKey, orphanKey, orphanCompletionMarkerKey}
 	sort.Strings(wantDeleted)
 	if strings.Join(deletedKeys, ",") != strings.Join(wantDeleted, ",") {
 		t.Fatalf("deleted keys = %v, want %v", deletedKeys, wantDeleted)

@@ -104,9 +104,20 @@ export function createMockR2Bucket(initialObjects?: Record<string, string>): R2B
 
       return createObjectBody(key, stored);
     },
-    async get(key: string): Promise<R2ObjectBody | R2Object | null> {
+    async get(key: string, options?: R2GetOptions): Promise<R2ObjectBody | R2Object | null> {
       const stored = objects.get(key);
       if (!stored) {
+        return null;
+      }
+
+      const onlyIf = options?.onlyIf;
+      if (
+        onlyIf &&
+        !(onlyIf instanceof Headers) &&
+        'etagMatches' in onlyIf &&
+        onlyIf.etagMatches &&
+        stored.etag !== onlyIf.etagMatches
+      ) {
         return null;
       }
 
@@ -116,7 +127,27 @@ export function createMockR2Bucket(initialObjects?: Record<string, string>): R2B
       key: string,
       value: string | ArrayBuffer | ArrayBufferView | Blob | ReadableStream,
       options?: R2PutOptions
-    ): Promise<R2Object> {
+    ): Promise<R2Object | null> {
+      const onlyIf = options?.onlyIf;
+      if (
+        onlyIf &&
+        !(onlyIf instanceof Headers) &&
+        'etagDoesNotMatch' in onlyIf &&
+        onlyIf.etagDoesNotMatch === '*' &&
+        objects.has(key)
+      ) {
+        return null;
+      }
+      if (
+        onlyIf &&
+        !(onlyIf instanceof Headers) &&
+        'etagMatches' in onlyIf &&
+        onlyIf.etagMatches &&
+        objects.get(key)?.etag !== onlyIf.etagMatches
+      ) {
+        return null;
+      }
+
       const bytes = await toUint8Array(value);
       const etag = await createEtag(bytes);
       const stored: StoredR2Object = {

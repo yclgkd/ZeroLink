@@ -1,8 +1,13 @@
 import type { Base64Url, HexString, MultipartFileRef, UnixMs, UUID } from '@zerolink/shared';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveInlineFilePlaintextBytes } from '../file-policy.ts';
 import { readRequestBytesUpToLimit } from '../file-routes.ts';
-import { createFileDownloadToken, createFileUploadId } from '../file-storage.ts';
+import {
+  buildMultipartChunkStorageKey,
+  buildMultipartUploadCompletionMarkerKey,
+  createFileDownloadToken,
+  createFileUploadId,
+} from '../file-storage.ts';
 import { createMockEnv, dispatch, VALID_UUID } from './helpers/worker-fixtures.ts';
 
 function asBase64Url(value: string): Base64Url {
@@ -38,6 +43,10 @@ function buildMultipartFileRef(
 }
 
 describe('backend worker routing — file upload and fetch routes', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('handles multipart initiate, chunk upload, completion, fetch, and download', async () => {
     let currentFileRef: MultipartFileRef | null = null;
     let currentCipherVersion = 0;
@@ -156,6 +165,42 @@ describe('backend worker routing — file upload and fetch routes', () => {
     expect(completeResponse.status).toBe(200);
     expect(completePayload.fileRef.storageBackend).toBe('r2');
     expect(completePayload.fileRef.chunks).toHaveLength(2);
+    expect(completePayload.fileRef.chunks[0]?.storageKey).toContain('/final/');
+    expect(completePayload.fileRef.chunks[1]?.storageKey).toContain('/final/');
+
+    const retryCompleteResponse = await dispatch(env, '/api/file/complete', 'POST', {
+      uploadId: initiatePayload.uploadId,
+      baseIv: 'base_iv',
+      encContentKey: 'enc_content_key',
+      chunkSizeBytes: 8,
+      totalPlaintextBytes: 16,
+      totalCiphertextBytes: 48,
+      chunks: [
+        {
+          index: 0,
+          etag: chunk0Etag,
+          ciphertextBytes: chunk0Body.length,
+          ciphertextHash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        {
+          index: 1,
+          etag: chunk1Etag,
+          ciphertextBytes: chunk1Body.length,
+          ciphertextHash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      ],
+    });
+    expect(retryCompleteResponse.status).toBe(200);
+    expect(await retryCompleteResponse.json()).toEqual(completePayload);
+
+    const lateChunkResponse = await dispatch(
+      env,
+      `/api/file/chunk/${VALID_UUID}/${initiatePayload.uploadId}/0`,
+      'PUT',
+      'late',
+      true
+    );
+    expect(lateChunkResponse.status).toBe(404);
 
     currentFileRef = completePayload.fileRef;
     currentCipherVersion = 0;
@@ -222,6 +267,227 @@ describe('backend worker routing — file upload and fetch routes', () => {
 
     expect(response.status).toBe(400);
     expect(payload.code).toBe('BAD_REQUEST');
+  });
+
+  it('rejects completion when a source chunk changes during finalization', async () => {
+    const { env } = createMockEnv(async (request) => {
+      if (request.url.endsWith('/get_public_state')) {
+        return new Response(
+          JSON.stringify({ ok: true, state: 'locked', securityProfile: 'secure' }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: false, code: 'UNEXPECTED' }), { status: 500 });
+    });
+
+    env.FILE_MULTIPART_SUPPORTED = 'true';
+    env.FILE_MAX_BYTES = 32;
+    env.FILE_MULTIPART_THRESHOLD_BYTES = 16;
+    env.FILE_CHUNK_SIZE_BYTES = 8;
+    env.FILE_MAX_CHUNKS = 4;
+
+    const initiateResponse = await dispatch(env, '/api/file/initiate', 'POST', {
+      channelUuid: VALID_UUID,
+      chunkCount: 1,
+      totalCiphertextBytes: 24,
+    });
+    const initiatePayload = (await initiateResponse.json()) as {
+      ok: true;
+      uploadId: string;
+    };
+    const originalBody = 'a'.repeat(24);
+    const chunkResponse = await dispatch(
+      env,
+      `/api/file/chunk/${VALID_UUID}/${initiatePayload.uploadId}/0`,
+      'PUT',
+      originalBody,
+      true
+    );
+    const sourceKey = buildMultipartChunkStorageKey(
+      VALID_UUID,
+      initiatePayload.uploadId as Base64Url,
+      0
+    );
+    const bucket = env.FILE_BUCKET;
+    if (!bucket) {
+      throw new Error('expected file bucket');
+    }
+    const originalGet = bucket.get.bind(bucket);
+    let replaced = false;
+    bucket.get = async (key, options) => {
+      if (key === sourceKey && !replaced) {
+        replaced = true;
+        await bucket.put(sourceKey, 'z'.repeat(24));
+      }
+      return originalGet(key, options);
+    };
+
+    const completeResponse = await dispatch(env, '/api/file/complete', 'POST', {
+      uploadId: initiatePayload.uploadId,
+      baseIv: 'base_iv',
+      encContentKey: 'enc_content_key',
+      chunkSizeBytes: 8,
+      totalPlaintextBytes: 8,
+      totalCiphertextBytes: 24,
+      chunks: [
+        {
+          index: 0,
+          etag: chunkResponse.headers.get('ETag'),
+          ciphertextBytes: originalBody.length,
+          ciphertextHash: makeCiphertextHash('a'),
+        },
+      ],
+    });
+    const payload = (await completeResponse.json()) as { ok: false; code: string };
+
+    expect(completeResponse.status).toBe(409);
+    expect(payload.code).toBe('UPLOAD_INCOMPLETE');
+    expect(replaced).toBe(true);
+  });
+
+  it('rejects completion retries with a different payload', async () => {
+    const { env } = createMockEnv(async (request) => {
+      if (request.url.endsWith('/get_public_state')) {
+        return new Response(
+          JSON.stringify({ ok: true, state: 'locked', securityProfile: 'secure' }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: false, code: 'UNEXPECTED' }), { status: 500 });
+    });
+
+    env.FILE_MULTIPART_SUPPORTED = 'true';
+    env.FILE_MAX_BYTES = 32;
+    env.FILE_MULTIPART_THRESHOLD_BYTES = 16;
+    env.FILE_CHUNK_SIZE_BYTES = 8;
+    env.FILE_MAX_CHUNKS = 4;
+
+    const initiateResponse = await dispatch(env, '/api/file/initiate', 'POST', {
+      channelUuid: VALID_UUID,
+      chunkCount: 1,
+      totalCiphertextBytes: 24,
+    });
+    const initiatePayload = (await initiateResponse.json()) as {
+      ok: true;
+      uploadId: string;
+    };
+    const chunkResponse = await dispatch(
+      env,
+      `/api/file/chunk/${VALID_UUID}/${initiatePayload.uploadId}/0`,
+      'PUT',
+      'a'.repeat(24),
+      true
+    );
+    const completeBody = {
+      uploadId: initiatePayload.uploadId,
+      baseIv: 'base_iv',
+      encContentKey: 'enc_content_key',
+      chunkSizeBytes: 8,
+      totalPlaintextBytes: 8,
+      totalCiphertextBytes: 24,
+      chunks: [
+        {
+          index: 0,
+          etag: chunkResponse.headers.get('ETag'),
+          ciphertextBytes: 24,
+          ciphertextHash: makeCiphertextHash('a'),
+        },
+      ],
+    };
+
+    const firstResponse = await dispatch(env, '/api/file/complete', 'POST', completeBody);
+    expect(firstResponse.status).toBe(200);
+
+    const retryResponse = await dispatch(env, '/api/file/complete', 'POST', {
+      ...completeBody,
+      baseIv: 'different_iv',
+    });
+    const retryPayload = (await retryResponse.json()) as { ok: false; code: string };
+
+    expect(retryResponse.status).toBe(400);
+    expect(retryPayload.code).toBe('BAD_REQUEST');
+  });
+
+  it('recovers an expired completion lease after an interrupted request', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+
+    const { env } = createMockEnv(async (request) => {
+      if (request.url.endsWith('/get_public_state')) {
+        return new Response(
+          JSON.stringify({ ok: true, state: 'locked', securityProfile: 'secure' }),
+          { status: 200 }
+        );
+      }
+      return new Response(JSON.stringify({ ok: false, code: 'UNEXPECTED' }), { status: 500 });
+    });
+
+    env.FILE_MULTIPART_SUPPORTED = 'true';
+    env.FILE_MAX_BYTES = 32;
+    env.FILE_MULTIPART_THRESHOLD_BYTES = 16;
+    env.FILE_CHUNK_SIZE_BYTES = 8;
+    env.FILE_MAX_CHUNKS = 4;
+
+    const initiateResponse = await dispatch(env, '/api/file/initiate', 'POST', {
+      channelUuid: VALID_UUID,
+      chunkCount: 1,
+      totalCiphertextBytes: 24,
+    });
+    const initiatePayload = (await initiateResponse.json()) as {
+      ok: true;
+      uploadId: string;
+    };
+    const chunkResponse = await dispatch(
+      env,
+      `/api/file/chunk/${VALID_UUID}/${initiatePayload.uploadId}/0`,
+      'PUT',
+      'a'.repeat(24),
+      true
+    );
+    const completeBody = {
+      uploadId: initiatePayload.uploadId,
+      baseIv: 'base_iv',
+      encContentKey: 'enc_content_key',
+      chunkSizeBytes: 8,
+      totalPlaintextBytes: 8,
+      totalCiphertextBytes: 24,
+      chunks: [
+        {
+          index: 0,
+          etag: chunkResponse.headers.get('ETag'),
+          ciphertextBytes: 24,
+          ciphertextHash: makeCiphertextHash('a'),
+        },
+      ],
+    };
+    const completionMarkerKey = buildMultipartUploadCompletionMarkerKey(
+      VALID_UUID,
+      initiatePayload.uploadId as Base64Url
+    );
+    const bucket = env.FILE_BUCKET;
+    if (!bucket) {
+      throw new Error('expected file bucket');
+    }
+    const originalPut = bucket.put.bind(bucket);
+    let interruptMarkerWrite = true;
+    bucket.put = async (key, value, options) => {
+      const result = await originalPut(key, value, options);
+      if (key === completionMarkerKey && interruptMarkerWrite) {
+        interruptMarkerWrite = false;
+        throw new Error('simulated process interruption');
+      }
+      return result;
+    };
+
+    const interruptedResponse = await dispatch(env, '/api/file/complete', 'POST', completeBody);
+    expect(interruptedResponse.status).toBe(500);
+    expect(await bucket.head(completionMarkerKey)).not.toBeNull();
+
+    bucket.put = originalPut;
+    vi.advanceTimersByTime(6 * 60_000);
+
+    const retryResponse = await dispatch(env, '/api/file/complete', 'POST', completeBody);
+    expect(retryResponse.status).toBe(200);
   });
 
   it('rejects initiate requests that exceed deployment max chunks', async () => {

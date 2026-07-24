@@ -2,6 +2,7 @@ import {
   AES_GCM,
   type Base64Url,
   FileFetchResponseSchema,
+  type FileUploadCompleteRequest,
   FileUploadCompleteRequestSchema,
   FileUploadInitiateRequestSchema,
   type HexString,
@@ -14,6 +15,8 @@ import { resolveFilePolicy, resolveInlineFilePlaintextBytes } from './file-polic
 import {
   buildMultipartChunkStorageKey,
   buildMultipartFileRef,
+  buildMultipartFinalStorageKey,
+  buildMultipartUploadCompletionMarkerKey,
   createFileDownloadToken,
   createFileUploadId,
   FILE_DOWNLOAD_TTL_MS,
@@ -28,10 +31,195 @@ import type { Env } from './worker.ts';
 const AES_GCM_TAG_BYTES = AES_GCM.TAG_LENGTH_BITS / 8;
 const FILE_UPLOAD_INITIATE_RATE_LIMIT_MAX_REQUESTS = 10;
 const FILE_UPLOAD_INITIATE_RATE_LIMIT_WINDOW_MS = 60_000;
+const MULTIPART_COMPLETION_LEASE_MS = 5 * 60_000;
+const MULTIPART_COMPLETION_ACQUIRE_ATTEMPTS = 4;
+
+type MultipartCompletionMarkerState = 'in_progress' | 'completed' | 'released';
+
+interface MultipartCompletionMarkerContext {
+  channelUuid: string;
+  uploadId: string;
+  uploadExpiresAt: number;
+  requestFingerprint: HexString;
+}
+
+interface MultipartCompletionMarkerMetadata {
+  completionState?: string;
+  requestFingerprint?: string;
+  leaseExpiresAt?: string;
+}
+
+type MultipartCompletionMarkerAcquisition =
+  | { kind: 'owned'; etag: string }
+  | { kind: 'completed' }
+  | { kind: 'in_progress' }
+  | { kind: 'mismatch' };
+
+class MultipartCompletionError extends Error {
+  constructor(
+    readonly code: 'BAD_REQUEST' | 'UPLOAD_INCOMPLETE',
+    readonly status: 400 | 409,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 const fileUploadInitiateRateLimitWindows = new WeakMap<
   Env,
   Map<string, { count: number; windowStart: number }>
 >();
+
+async function createMultipartCompletionFingerprint(
+  request: FileUploadCompleteRequest
+): Promise<HexString> {
+  const canonicalRequest = JSON.stringify({
+    uploadId: request.uploadId,
+    baseIv: request.baseIv,
+    encContentKey: request.encContentKey,
+    chunkSizeBytes: request.chunkSizeBytes,
+    totalPlaintextBytes: request.totalPlaintextBytes,
+    totalCiphertextBytes: request.totalCiphertextBytes,
+    chunks: [...request.chunks]
+      .sort((left, right) => left.index - right.index)
+      .map((chunk) => ({
+        index: chunk.index,
+        etag: chunk.etag,
+        ciphertextBytes: chunk.ciphertextBytes,
+        ciphertextHash: chunk.ciphertextHash,
+      })),
+  });
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonicalRequest));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(
+    ''
+  ) as HexString;
+}
+
+function readMultipartCompletionMarker(object: R2Object): {
+  state: MultipartCompletionMarkerState;
+  requestFingerprint: string;
+  leaseExpiresAt: number;
+} | null {
+  const metadata = object.customMetadata as MultipartCompletionMarkerMetadata | undefined;
+  const state = metadata?.completionState;
+  const requestFingerprint = metadata?.requestFingerprint;
+  const leaseExpiresAt = Number(metadata?.leaseExpiresAt);
+  if (
+    (state !== 'in_progress' && state !== 'completed' && state !== 'released') ||
+    !requestFingerprint ||
+    !Number.isFinite(leaseExpiresAt)
+  ) {
+    return null;
+  }
+  return { state, requestFingerprint, leaseExpiresAt };
+}
+
+function multipartCompletionMarkerBody(
+  state: MultipartCompletionMarkerState,
+  requestFingerprint: HexString
+): string {
+  return JSON.stringify({
+    state,
+    requestFingerprint,
+    nonce: crypto.randomUUID(),
+  });
+}
+
+function multipartCompletionMarkerMetadata(
+  context: MultipartCompletionMarkerContext,
+  state: MultipartCompletionMarkerState,
+  leaseExpiresAt: number
+): Record<string, string> {
+  return {
+    channelUuid: context.channelUuid,
+    uploadId: context.uploadId,
+    expiresAt: String(context.uploadExpiresAt),
+    completionState: state,
+    requestFingerprint: context.requestFingerprint,
+    leaseExpiresAt: String(leaseExpiresAt),
+  };
+}
+
+async function writeMultipartCompletionMarker(
+  bucket: R2Bucket,
+  markerKey: string,
+  context: MultipartCompletionMarkerContext,
+  state: MultipartCompletionMarkerState,
+  onlyIf: R2Conditional
+): Promise<R2Object | null> {
+  const leaseExpiresAt =
+    state === 'in_progress' ? Date.now() + MULTIPART_COMPLETION_LEASE_MS : Date.now();
+  return bucket.put(markerKey, multipartCompletionMarkerBody(state, context.requestFingerprint), {
+    onlyIf,
+    customMetadata: multipartCompletionMarkerMetadata(context, state, leaseExpiresAt),
+  });
+}
+
+async function acquireMultipartCompletionMarker(
+  bucket: R2Bucket,
+  markerKey: string,
+  context: MultipartCompletionMarkerContext
+): Promise<MultipartCompletionMarkerAcquisition> {
+  for (let attempt = 0; attempt < MULTIPART_COMPLETION_ACQUIRE_ATTEMPTS; attempt += 1) {
+    const existing = await bucket.head(markerKey);
+    if (!existing) {
+      const created = await writeMultipartCompletionMarker(
+        bucket,
+        markerKey,
+        context,
+        'in_progress',
+        { etagDoesNotMatch: '*' }
+      );
+      if (created) {
+        return { kind: 'owned', etag: created.etag };
+      }
+      continue;
+    }
+
+    const marker = readMultipartCompletionMarker(existing);
+    if (!marker) {
+      return { kind: 'in_progress' };
+    }
+    if (marker.state === 'completed') {
+      return marker.requestFingerprint === context.requestFingerprint
+        ? { kind: 'completed' }
+        : { kind: 'mismatch' };
+    }
+    if (marker.state === 'in_progress') {
+      if (marker.requestFingerprint !== context.requestFingerprint) {
+        return { kind: 'mismatch' };
+      }
+      if (marker.leaseExpiresAt > Date.now()) {
+        return { kind: 'in_progress' };
+      }
+    }
+
+    const claimed = await writeMultipartCompletionMarker(
+      bucket,
+      markerKey,
+      context,
+      'in_progress',
+      { etagMatches: existing.etag }
+    );
+    if (claimed) {
+      return { kind: 'owned', etag: claimed.etag };
+    }
+  }
+
+  return { kind: 'in_progress' };
+}
+
+async function transitionMultipartCompletionMarker(
+  bucket: R2Bucket,
+  markerKey: string,
+  context: MultipartCompletionMarkerContext,
+  ownerETag: string,
+  state: 'completed' | 'released'
+): Promise<R2Object | null> {
+  return writeMultipartCompletionMarker(bucket, markerKey, context, state, {
+    etagMatches: ownerETag,
+  });
+}
 
 function buildHeaders(): Headers {
   return new Headers({
@@ -382,6 +570,19 @@ export async function handleFileChunkUpload(
     return errorResponse('BAD_REQUEST', 400);
   }
 
+  const completionMarkerKey = buildMultipartUploadCompletionMarkerKey(uuid, uploadId as Base64Url);
+  const completionMarkerObject = await env.FILE_BUCKET.head(completionMarkerKey);
+  if (completionMarkerObject) {
+    const completionMarker = readMultipartCompletionMarker(completionMarkerObject);
+    if (
+      !completionMarker ||
+      completionMarker.state === 'completed' ||
+      (completionMarker.state === 'in_progress' && completionMarker.leaseExpiresAt > Date.now())
+    ) {
+      return errorResponse('NOT_FOUND', 404);
+    }
+  }
+
   const policy = resolveFilePolicy(env);
   const chunkBody = await readRequestBytesUpToLimit(
     request,
@@ -460,14 +661,6 @@ export async function handleFileUploadComplete(request: Request, env: Env): Prom
   }
 
   const sortedChunks = [...parsed.data.chunks].sort((left, right) => left.index - right.index);
-  const resolvedChunks: Array<{
-    index: number;
-    storageKey: string;
-    ciphertextBytes: number;
-    ciphertextHash: HexString;
-    etag: string;
-  }> = [];
-
   for (const chunk of sortedChunks) {
     const expectedCiphertextBytes = resolveExpectedChunkCiphertextBytes(
       parsed.data.totalPlaintextBytes,
@@ -478,30 +671,180 @@ export async function handleFileUploadComplete(request: Request, env: Env): Prom
     if (expectedCiphertextBytes == null || chunk.ciphertextBytes !== expectedCiphertextBytes) {
       return errorResponse('BAD_REQUEST', 400);
     }
+  }
 
-    const storageKey = buildMultipartChunkStorageKey(
-      uploadSession.channelUuid,
-      parsed.data.uploadId as Base64Url,
-      chunk.index
+  const completionMarkerKey = buildMultipartUploadCompletionMarkerKey(
+    uploadSession.channelUuid,
+    parsed.data.uploadId as Base64Url
+  );
+  const markerContext: MultipartCompletionMarkerContext = {
+    channelUuid: uploadSession.channelUuid,
+    uploadId: parsed.data.uploadId,
+    uploadExpiresAt: Number(uploadSession.expiresAt),
+    requestFingerprint: await createMultipartCompletionFingerprint(parsed.data),
+  };
+  const markerAcquisition = await acquireMultipartCompletionMarker(
+    env.FILE_BUCKET,
+    completionMarkerKey,
+    markerContext
+  );
+  if (markerAcquisition.kind === 'mismatch') {
+    return errorResponse('BAD_REQUEST', 400);
+  }
+  if (markerAcquisition.kind === 'in_progress') {
+    return errorResponse('UPLOAD_INCOMPLETE', 409);
+  }
+
+  if (markerAcquisition.kind === 'completed') {
+    const finalizedChunks: Array<{
+      index: number;
+      sourceStorageKey: string;
+      storageKey: string;
+      ciphertextBytes: number;
+      ciphertextHash: HexString;
+      etag: string;
+    }> = [];
+
+    for (const chunk of sortedChunks) {
+      const sourceStorageKey = buildMultipartChunkStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalStorageKey = buildMultipartFinalStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalizedObject = await env.FILE_BUCKET.head(finalStorageKey);
+      if (!finalizedObject || finalizedObject.size !== chunk.ciphertextBytes) {
+        return errorResponse('UPLOAD_INCOMPLETE', 409);
+      }
+
+      finalizedChunks.push({
+        index: chunk.index,
+        sourceStorageKey,
+        storageKey: finalStorageKey,
+        ciphertextBytes: chunk.ciphertextBytes,
+        ciphertextHash: chunk.ciphertextHash,
+        etag: chunk.etag,
+      });
+    }
+
+    return jsonResponse(
+      makeFileCompleteResponse(buildMultipartFileRef(uploadSession, parsed.data, finalizedChunks)),
+      200
     );
-    const storedObject = await env.FILE_BUCKET.head(storageKey);
-    if (!storedObject) {
-      return errorResponse('UPLOAD_INCOMPLETE', 409);
-    }
-    if (storedObject.size !== chunk.ciphertextBytes) {
-      return errorResponse('BAD_REQUEST', 400);
-    }
-    if (storedObject.etag !== chunk.etag) {
-      return errorResponse('UPLOAD_INCOMPLETE', 409);
+  }
+
+  const completionMarkerETag = markerAcquisition.etag;
+  const resolvedChunks: Array<{
+    index: number;
+    sourceStorageKey: string;
+    storageKey: string;
+    ciphertextBytes: number;
+    ciphertextHash: HexString;
+    etag: string;
+  }> = [];
+
+  try {
+    for (const chunk of sortedChunks) {
+      const storageKey = buildMultipartChunkStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const finalStorageKey = buildMultipartFinalStorageKey(
+        uploadSession.channelUuid,
+        parsed.data.uploadId as Base64Url,
+        chunk.index
+      );
+      const storedObject = await env.FILE_BUCKET.head(storageKey);
+      if (!storedObject) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `missing multipart chunk: ${storageKey}`
+        );
+      }
+      if (storedObject.size !== chunk.ciphertextBytes) {
+        throw new MultipartCompletionError(
+          'BAD_REQUEST',
+          400,
+          `multipart chunk size mismatch: ${storageKey}`
+        );
+      }
+      if (storedObject.etag !== chunk.etag) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `multipart chunk changed before finalization: ${storageKey}`
+        );
+      }
+
+      resolvedChunks.push({
+        index: chunk.index,
+        sourceStorageKey: storageKey,
+        storageKey: finalStorageKey,
+        ciphertextBytes: chunk.ciphertextBytes,
+        ciphertextHash: chunk.ciphertextHash,
+        etag: chunk.etag,
+      });
     }
 
-    resolvedChunks.push({
-      index: chunk.index,
-      storageKey,
-      ciphertextBytes: chunk.ciphertextBytes,
-      ciphertextHash: chunk.ciphertextHash,
-      etag: chunk.etag,
-    });
+    for (const chunk of resolvedChunks) {
+      const sourceObject = await env.FILE_BUCKET.get(chunk.sourceStorageKey, {
+        onlyIf: {
+          etagMatches: chunk.etag,
+        },
+      });
+      if (!sourceObject || !('arrayBuffer' in sourceObject)) {
+        throw new MultipartCompletionError(
+          'UPLOAD_INCOMPLETE',
+          409,
+          `multipart chunk changed during finalization: ${chunk.sourceStorageKey}`
+        );
+      }
+
+      await env.FILE_BUCKET.put(chunk.storageKey, await sourceObject.arrayBuffer(), {
+        httpMetadata: {
+          contentType: 'application/octet-stream',
+        },
+        customMetadata: {
+          channelUuid: uploadSession.channelUuid,
+          uploadId: parsed.data.uploadId,
+          chunkIndex: String(chunk.index),
+          expiresAt: String(uploadSession.expiresAt),
+        },
+      });
+    }
+
+    const completedMarker = await transitionMultipartCompletionMarker(
+      env.FILE_BUCKET,
+      completionMarkerKey,
+      markerContext,
+      completionMarkerETag,
+      'completed'
+    );
+    if (!completedMarker) {
+      throw new MultipartCompletionError(
+        'UPLOAD_INCOMPLETE',
+        409,
+        'multipart completion lease was lost'
+      );
+    }
+  } catch (error) {
+    await transitionMultipartCompletionMarker(
+      env.FILE_BUCKET,
+      completionMarkerKey,
+      markerContext,
+      completionMarkerETag,
+      'released'
+    ).catch(() => undefined);
+    if (error instanceof MultipartCompletionError) {
+      return errorResponse(error.code, error.status);
+    }
+    throw error;
   }
 
   return jsonResponse(

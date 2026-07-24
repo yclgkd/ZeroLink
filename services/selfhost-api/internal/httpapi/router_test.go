@@ -1203,6 +1203,54 @@ func TestFileCompleteHandlerAcceptsSignedUploadSessionAcrossAuthorizers(t *testi
 	}
 }
 
+func TestFileCompleteHandlerAllowsRetryAfterUploadRevocation(t *testing.T) {
+	t.Parallel()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proxyTargets := newProxyTargetAuthorizer(testUploadTokenSecret)
+	uploadID, err := proxyTargets.IssueUploadSession("aaaaaaaaaaaaaaaaaaaaa", 1, 24, time.Minute)
+	if err != nil {
+		t.Fatalf("issue upload session: %v", err)
+	}
+	requestBody := `{"uploadId":"` + uploadID + `","baseIv":"YmFzZV9pdg","encContentKey":"ZW5jX2NvbnRlbnRfa2V5","chunkSizeBytes":8,"totalPlaintextBytes":8,"totalCiphertextBytes":24,"chunks":[{"index":0,"etag":"etag-0","ciphertextBytes":24,"ciphertextHash":"` + strings.Repeat("a", 64) + `"}]}`
+	completeCalls := 0
+	handler := fileCompleteHandler(
+		stubFileStore{
+			completeUpload: func(context.Context, filestore.FileUploadCompleteRequest) (filestore.MultipartFileRef, error) {
+				completeCalls++
+				return filestore.MultipartFileRef{}, nil
+			},
+		},
+		FilePolicy{
+			MaxFileBytes:            64,
+			MultipartThresholdBytes: 16,
+			ChunkSizeBytes:          8,
+			MaxChunks:               4,
+			MultipartSupported:      true,
+		},
+		proxyTargets,
+		logger,
+		defaultMaxProtocolBodyBytes,
+	)
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/file/complete", strings.NewReader(requestBody))
+	firstRes := httptest.NewRecorder()
+	handler.ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("first completion status = %d, want 200: %s", firstRes.Code, firstRes.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/file/complete", strings.NewReader(requestBody))
+	secondRes := httptest.NewRecorder()
+	handler.ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusOK {
+		t.Fatalf("retry completion status = %d, want 200: %s", secondRes.Code, secondRes.Body.String())
+	}
+	if completeCalls != 2 {
+		t.Fatalf("completeUpload calls = %d, want 2", completeCalls)
+	}
+}
+
 func TestFileCompleteHandlerRejectsChunkCountMismatch(t *testing.T) {
 	t.Parallel()
 

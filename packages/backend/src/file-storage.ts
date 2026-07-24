@@ -231,6 +231,21 @@ export function buildMultipartChunkStorageKey(
   return `${FILE_CHUNK_PREFIX}/${channelUuid}/${uploadId}/${String(index).padStart(4, '0')}.${FILE_CHUNK_SUFFIX}`;
 }
 
+export function buildMultipartFinalStorageKey(
+  channelUuid: string,
+  uploadId: Base64Url,
+  index: number
+): string {
+  return `${FILE_CHUNK_PREFIX}/${channelUuid}/${uploadId}/final/${String(index).padStart(4, '0')}.${FILE_CHUNK_SUFFIX}`;
+}
+
+export function buildMultipartUploadCompletionMarkerKey(
+  channelUuid: string,
+  uploadId: Base64Url
+): string {
+  return `${FILE_CHUNK_PREFIX}/${channelUuid}/${uploadId}/complete`;
+}
+
 export async function createFileUploadId(
   secret: string,
   session: FileUploadSession
