@@ -1,6 +1,6 @@
 import { CHANNEL_STATE, parseManageFragment, UUIDSchema } from '@zerolink/shared';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useLocation } from 'react-router';
 import { apiClient } from '../../api/client';
 import { deriveSafetyCodeDisplay } from '../../crypto/safety-code-derive';
 import { deserializeWrappedKeyCompact } from '../../crypto/wrapped-key-codec';

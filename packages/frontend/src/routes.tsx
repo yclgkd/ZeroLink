@@ -2,8 +2,8 @@ import { ROUTE_PATTERN } from '@zerolink/shared';
 import { AlertTriangle, X } from 'lucide-react';
 import { type ReactElement, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { RouteObject } from 'react-router-dom';
-import { Link, Outlet, useLocation } from 'react-router-dom';
+import type { RouteObject } from 'react-router';
+import { Link, Outlet, useLocation } from 'react-router';
 import { Toaster } from 'sonner';
 
 import { AppShellFooter } from './components/layout';

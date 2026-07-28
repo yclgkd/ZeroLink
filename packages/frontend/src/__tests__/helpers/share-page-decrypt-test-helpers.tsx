@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { SECURITY_PROFILE } from '@zerolink/shared';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { expect, vi } from 'vitest';
 import { createIndexedDbReceiverKeyStorage, type ReceiverKeyEnvelope } from '../../crypto/storage';
 import { SharePage } from '../../pages/SharePage';

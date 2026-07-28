@@ -2,7 +2,7 @@ import { type ChannelTtlMs, SECURITY_PROFILE, type SecurityProfile } from '@zero
 import { Lock, Shield, Zap } from 'lucide-react';
 import { useId, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation } from 'react-router';
 
 import { StateNotice } from '../../components/layout';
 import { PassphraseInput } from '../../components/lock/passphrase-input';

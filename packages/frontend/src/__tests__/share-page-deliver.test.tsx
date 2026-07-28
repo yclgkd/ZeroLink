@@ -4,7 +4,7 @@ import 'fake-indexeddb/auto';
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { Base64UrlSchema, HexStringSchema, SECURITY_PROFILE } from '@zerolink/shared';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { lockChannelMock, decryptDeliveredMock, syncHarness } = vi.hoisted(() => ({

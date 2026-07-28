@@ -2,7 +2,7 @@ import { CHANNEL_STATE, type ChannelState } from '@zerolink/shared';
 import { ClipboardCheck, Copy, PlusCircle, Send, Trash2 } from 'lucide-react';
 import { type ReactElement, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router';
 import {
   PageCardDescription,
   PageCardHeader,
