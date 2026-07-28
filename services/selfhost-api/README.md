@@ -71,7 +71,7 @@ cd services/selfhost-api
 docker run --rm \
   -v "$PWD:/app" \
   -w /app \
-  golang:1.24.0 \
+  golang:1.25 \
   /bin/bash -lc '/usr/local/go/bin/go test ./...'
 ```
 

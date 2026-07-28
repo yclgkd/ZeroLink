@@ -143,10 +143,7 @@ describe('unwrapPrivateKey', () => {
     'fails unwrap with wrong password',
     async () => {
       const keyPair = await generateReceiverKeyPair();
-      const wrapped = await wrapPrivateKey({
-        privateKey: keyPair.privateKey,
-        password: 'password',
-      });
+      const wrapped = await wrapPrivateKeyFast(keyPair.privateKey, 'password');
 
       await expect(unwrapPrivateKey({ wrapped, password: 'wrong-password' })).rejects.toThrow(
         'Private key unwrap failed'
