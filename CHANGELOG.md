@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.0](https://github.com/yclgkd/zerolink/compare/v0.7.0...v0.8.0) (2026-07-28)
+
+
+### Features
+
+* link release metadata ([1414592](https://github.com/yclgkd/zerolink/commit/1414592ce425fe8a453a22a6575f3813bda97c86))
+
+
+### Bug Fixes
+
+* harden self-host maintenance ([#300](https://github.com/yclgkd/zerolink/issues/300)) ([1fd498f](https://github.com/yclgkd/zerolink/commit/1fd498f84feac6410eba08ab226a8e8d5a64357b))
+* limit JSON request bodies ([#302](https://github.com/yclgkd/zerolink/issues/302)) ([462423c](https://github.com/yclgkd/zerolink/commit/462423cc1a798fca17133e943ea6f178c4ba8ca8))
+* pin esbuild to patched version ([#294](https://github.com/yclgkd/zerolink/issues/294)) ([3b7b7b1](https://github.com/yclgkd/zerolink/commit/3b7b7b19c1a208b615794f7852e6418cf6da602d))
+* pin ws to patched version ([a512f0e](https://github.com/yclgkd/zerolink/commit/a512f0eb0779c564af56a3965b6383d491725df7))
+* resolve Dependabot security alerts ([f327774](https://github.com/yclgkd/zerolink/commit/f327774dd3780d3314056fbf6ca54c5aef004a40))
+* revoke completed multipart uploads ([#301](https://github.com/yclgkd/zerolink/issues/301)) ([c46207a](https://github.com/yclgkd/zerolink/commit/c46207a1fc2fe08e449d0c3f06bb2ad1b50c1436))
+* stabilize docs and coverage tests ([#303](https://github.com/yclgkd/zerolink/issues/303)) ([82c8fc6](https://github.com/yclgkd/zerolink/commit/82c8fc61eff30f5801209aefea0171e5ef043652))
+* update fast-uri override ([4e5413f](https://github.com/yclgkd/zerolink/commit/4e5413fcb191016fad80731377608f99fc9f3bc3))
+* update postcss security patch ([fe06325](https://github.com/yclgkd/zerolink/commit/fe0632525881e5ec3b7f2aee97a4713f50c3fac8))
+
 ## [0.7.0](https://github.com/yclgkd/ZeroLink/compare/v0.6.2...v0.7.0) (2026-04-29)
 
 
