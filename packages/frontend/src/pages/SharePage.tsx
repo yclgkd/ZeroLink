@@ -1,7 +1,7 @@
 import { CHANNEL_STATE } from '@zerolink/shared';
 import { type ReactElement, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLocation, useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router';
 
 import { PageCard, PageCardContent, StateNotice } from '../components/layout';
 import { SharePageHeader } from '../components/share/share-page-header';

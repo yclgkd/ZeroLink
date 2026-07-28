@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CHANNEL_TTL_MS, SECURITY_PROFILE } from '@zerolink/shared';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { detectWebAuthnSupportMock, createChannelMock } = vi.hoisted(() => ({

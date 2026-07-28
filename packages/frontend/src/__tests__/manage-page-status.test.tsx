@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { CHANNEL_TTL_MS, SECURITY_PROFILE } from '@zerolink/shared';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { deliverSecretMock, deleteChannelMock, syncHarness } = vi.hoisted(() => ({

@@ -1,7 +1,7 @@
 import { CHANNEL_STATE } from '@zerolink/shared';
 import { type ReactElement, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useParams } from 'react-router-dom';
+import { useParams } from 'react-router';
 import { ChannelUnavailableState } from '../components/channel/channel-unavailable-state';
 import { PageCard, PageCardContent, StateNotice } from '../components/layout';
 import { PassphraseInput } from '../components/lock/passphrase-input';

@@ -1,6 +1,6 @@
 import { type ReactElement, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router';
 
 import {
   PageCard,
