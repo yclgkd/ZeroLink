@@ -8,6 +8,7 @@ import {
   createFileDownloadToken,
   createFileUploadId,
 } from '../file-storage.ts';
+import { MAX_JSON_BODY_BYTES } from '../request-body.ts';
 import { createMockEnv, dispatch, VALID_UUID } from './helpers/worker-fixtures.ts';
 
 function asBase64Url(value: string): Base64Url {
@@ -267,6 +268,25 @@ describe('backend worker routing — file upload and fetch routes', () => {
 
     expect(response.status).toBe(400);
     expect(payload.code).toBe('BAD_REQUEST');
+  });
+
+  it('rejects oversized JSON bodies before file upload initiation', async () => {
+    const { env, calls } = createMockEnv(async () => {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    const body = JSON.stringify({
+      channelUuid: VALID_UUID,
+      chunkCount: 1,
+      totalCiphertextBytes: 24,
+      padding: 'x'.repeat(MAX_JSON_BODY_BYTES + 1),
+    });
+
+    const response = await dispatch(env, '/api/file/initiate', 'POST', body, true);
+    const payload = (await response.json()) as { ok: false; code: string };
+
+    expect(response.status).toBe(413);
+    expect(payload.code).toBe('PAYLOAD_TOO_LARGE');
+    expect(calls).toHaveLength(0);
   });
 
   it('rejects completion when a source chunk changes during finalization', async () => {
@@ -707,6 +727,23 @@ describe('backend worker routing — file upload and fetch routes', () => {
 
     expect(bytes).toBeNull();
     expect(pullCount).toBe(2);
+  });
+
+  it('cancels request bodies rejected by Content-Length', async () => {
+    let cancelCount = 0;
+    const request = {
+      headers: new Headers({ 'Content-Length': '25' }),
+      body: new ReadableStream<Uint8Array>({
+        cancel() {
+          cancelCount += 1;
+        },
+      }),
+    } as unknown as Request;
+
+    const bytes = await readRequestBytesUpToLimit(request, 24);
+
+    expect(bytes).toBeNull();
+    expect(cancelCount).toBe(1);
   });
 
   it('rejects expired upload sessions on complete', async () => {

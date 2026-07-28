@@ -1,6 +1,7 @@
 import { CHANNEL_STATE } from '@zerolink/shared';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { MAX_JSON_BODY_BYTES } from '../../request-body.ts';
 import { CHANNEL_RECORD_KEY, SecretVault, type SecretVaultEnv } from '../SecretVault.ts';
 import {
   asUnixMs,
@@ -165,6 +166,30 @@ describe('SecretVault lock challenge flow', () => {
     expect(payload).toEqual({
       ok: false,
       code: 'BAD_REQUEST',
+    });
+  });
+
+  it('returns 413 for oversized lock_begin payloads', async () => {
+    const { state } = createMockState();
+    const vault = new SecretVault(state, env);
+    const body = JSON.stringify({
+      uuid: 'abcdefghijklmnopqrstu',
+      padding: 'x'.repeat(MAX_JSON_BODY_BYTES + 1),
+    });
+
+    const response = await vault.fetch(
+      new Request('https://zerolink.test/lock_begin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      })
+    );
+    const payload = (await response.json()) as { ok: false; code: string };
+
+    expect(response.status).toBe(413);
+    expect(payload).toEqual({
+      ok: false,
+      code: 'PAYLOAD_TOO_LARGE',
     });
   });
 });
