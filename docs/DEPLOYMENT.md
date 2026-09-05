@@ -26,7 +26,7 @@ For Docker Compose self-hosting, see [SELF_HOSTED_DEPLOYMENT.md](./SELF_HOSTED_D
 | Requirement | Description | Minimum Version |
 |-------------|-------------|-----------------|
 | Cloudflare Account | Free plan is sufficient (supports Durable Objects free tier) | — |
-| Node.js | JavaScript runtime | 22.x |
+| Node.js | JavaScript runtime | >=22.22.0 |
 | pnpm | Package manager | 9.x |
 | Wrangler CLI | Official Cloudflare deployment tool | 4.x |
 

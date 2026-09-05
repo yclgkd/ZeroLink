@@ -107,7 +107,7 @@ ZeroLink supports two deployment paths:
 ### Cloudflare Deployment Prerequisites
 
 - Cloudflare account (free plan is sufficient; Durable Objects free tier supported)
-- Node.js 22+ · pnpm 9+ · Wrangler CLI 4+
+- Node.js >=22.22.0 · pnpm 9+ · Wrangler CLI 4+
 
 For the full step-by-step process, see the [Deployment Guide](./docs/DEPLOYMENT.md). Self-hosting
 with Docker Compose does not require the Cloudflare toolchain.

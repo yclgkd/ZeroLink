@@ -4,7 +4,7 @@
 
 ## Prerequisites
 
-- Node.js >= 22
+- Node.js >=22.22.0
 - pnpm >= 9
 
 ## Local Development

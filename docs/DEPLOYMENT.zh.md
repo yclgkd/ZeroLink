@@ -29,7 +29,7 @@
 | 要求 | 说明 | 最低版本 |
 |------|------|---------|
 | Cloudflare 账号 | 免费版即可（支持 Durable Objects 免费层） | — |
-| Node.js | JavaScript 运行时 | 22.x |
+| Node.js | JavaScript 运行时 | >=22.22.0 |
 | pnpm | 包管理器 | 9.x |
 | Wrangler CLI | Cloudflare 官方部署工具 | 4.x |
 

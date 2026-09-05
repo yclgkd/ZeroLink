@@ -109,7 +109,7 @@ ZeroLink 目前提供两条部署路径：
 ### Cloudflare 部署前提 / Cloudflare Deployment Prerequisites
 
 - Cloudflare 账号（免费计划即可，支持 Durable Objects 免费层）
-- Node.js 22+ · pnpm 9+ · Wrangler CLI 4+
+- Node.js >=22.22.0 · pnpm 9+ · Wrangler CLI 4+
 
 完整部署文档见 [部署指南](./docs/DEPLOYMENT.zh.md)。Docker Compose 自部署不需要
 Cloudflare 工具链。

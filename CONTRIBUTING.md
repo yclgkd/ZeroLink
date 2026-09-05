@@ -4,7 +4,7 @@ Thank you for your interest in contributing to ZeroLink! This guide will help yo
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 22+
+- [Node.js](https://nodejs.org/) >=22.22.0
 - [pnpm](https://pnpm.io/) 9+
 - [Git](https://git-scm.com/)
 
