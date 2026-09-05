@@ -59,11 +59,13 @@
   "pnpm": {
     "overrides": {
       "@babel/core": "7.29.7",
+      "browserslist": "4.28.7",
       "esbuild": "0.28.1",
-      "fast-uri": "3.1.5",
-      "js-yaml": "4.3.0",
+      "fast-uri": "3.1.6",
+      "fflate": "0.8.3",
+      "js-yaml": "4.3.1",
       "picomatch": "4.0.4",
-      "postcss": "8.5.18",
+      "postcss": "8.5.23",
       "sharp": "0.35.0",
       "undici": "7.29.0",
       "ws": "8.21.0",
