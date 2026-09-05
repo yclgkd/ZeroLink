@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/yclgkd/zerolink/compare/v0.8.0...v0.8.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* bump vulnerable dependencies ([#306](https://github.com/yclgkd/zerolink/issues/306)) ([d06e281](https://github.com/yclgkd/zerolink/commit/d06e281a726ebaf6ad441f14b31b6e5876e40b8b))
+* patch nine dependency security advisories ([b62a561](https://github.com/yclgkd/zerolink/commit/b62a561ebc41db2cd63a12ac01aedb474479ccc4))
+
 ## [0.8.0](https://github.com/yclgkd/zerolink/compare/v0.7.0...v0.8.0) (2026-07-28)
 
 
